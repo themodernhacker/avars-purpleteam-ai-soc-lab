@@ -1,0 +1,48 @@
+# Terraform Variables File
+# Copy this to terraform.tfvars and update with your Azure details
+
+azure_subscription_id = "YOUR_SUBSCRIPTION_ID_HERE"
+azure_tenant_id       = "YOUR_TENANT_ID_HERE"
+
+resource_group_name = "avars-rg"
+location             = "eastus"
+environment          = "lab"
+project_name         = "avars"
+
+# Network Configuration
+hub_vnet_cidr                = "10.0.0.0/16"
+hub_firewall_subnet_cidr     = "10.0.1.0/24"
+hub_management_subnet_cidr   = "10.0.2.0/24"
+
+spoke1_vnet_cidr             = "10.1.0.0/16"
+spoke1_container_subnet_cidr = "10.1.1.0/24"
+
+spoke2_vnet_cidr             = "10.2.0.0/16"
+spoke2_attack_subnet_cidr    = "10.2.1.0/24"
+
+# Monitoring
+log_analytics_retention_days = 30
+sentinel_enabled             = true
+
+# Honeypot
+juice_shop_image      = "bkimminich/juice-shop:latest"
+honeypot_port_http    = 80
+honeypot_port_https   = 443
+honeypot_port_ssh     = 22
+
+# Azure Firewall
+firewall_sku    = "Standard"
+allow_kali_ip   = true
+
+# Kali VM
+kali_vm_size        = "Standard_B2s"
+kali_admin_username = "azureuser"
+
+# Tags
+tags = {
+  Project     = "A.V.A.R.S"
+  Environment = "Lab"
+  ManagedBy   = "Terraform"
+  Purpose     = "Cybersecurity Lab"
+  Owner       = "Security Team"
+}

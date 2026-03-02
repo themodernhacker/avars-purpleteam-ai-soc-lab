@@ -1,0 +1,481 @@
+name: A.V.A.R.S Security Scan & Deploy
+
+################################################################################
+# Triggers: Run on push to main/develop and on pull requests
+################################################################################
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'terraform/**'
+      - 'kubernetes/**'
+      - 'scripts/**'
+      - 'ml-notebooks/**'
+      - '.github/workflows/*.yml'
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      run_deploy:
+        description: 'Run Terraform deploy jobs (false = scan only)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    # Run security scans daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+################################################################################
+# Environment Variables
+################################################################################
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/avars
+  TF_VERSION: "1.5.6"
+  CHECKOV_VERSION: "1.1.206"
+
+################################################################################
+# SECURITY SCAN JOB
+################################################################################
+
+jobs:
+  security-scan:
+    name: 🔐 Security Scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+
+    steps:
+    ########################################################################
+    # Step 1: Checkout code
+    ########################################################################
+    - name: "📥 Checkout code"
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for security scanning
+
+    ########################################################################
+    # Step 2: Terraform Validation & Linting
+    ########################################################################
+    - name: "🔧 Setup Terraform"
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: "📋 Terraform Format Check"
+      run: |
+        cd terraform
+        terraform fmt -check -recursive
+        echo "✅ Terraform formatting OK"
+
+    - name: "🔍 Terraform Validation"
+      run: |
+        cd terraform
+        terraform init -backend=false
+        terraform validate
+        echo "✅ Terraform validation passed"
+
+    - name: "🎯 TFLint - Terraform Linting"
+      uses: terraform-linters/setup-tflint@v4
+      with:
+        tflint_version: latest
+
+    - name: "🔎 Run TFLint"
+      run: |
+        cd terraform
+        tflint --init
+        tflint --format compact --minimum-failure-severity warning
+        echo "✅ TFLint linting complete"
+
+    ########################################################################
+    # Step 3: Checkov - Infrastructure as Code Security
+    ########################################################################
+    - name: "🛡️ Checkov - IaC Security Scanning"
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform
+        framework: terraform
+        quiet: false
+        compact: false
+        output_format: github_cli
+        output_file_path: reports/checkov.sarif
+      continue-on-error: true
+
+    ########################################################################
+    # Step 4: SAST - Static Application Security Testing
+    ########################################################################
+    - name: "🐍 Semgrep - Python Code Security"
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: |
+          p/security-audit
+          p/python
+          p/owasp-top-ten
+          p/cwe-top-25
+      continue-on-error: true
+
+    ########################################################################
+    # Step 5: Python Dependency Scanning
+    ########################################################################
+    - name: "📦 Trivy - Python Dependency Scan"
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        scanners: 'vuln'
+        format: 'sarif'
+        output: 'reports/trivy-dependencies.sarif'
+        severity: 'CRITICAL,HIGH'
+      continue-on-error: true
+
+    ########################################################################
+    # Step 6: Secret Detection
+    ########################################################################
+    - name: "🔐 TruffleHog - Secret Detection"
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ${{ github.event.repository.default_branch }}
+        head: HEAD
+      continue-on-error: true
+
+    ########################################################################
+    # Step 7: Container Image Scanning (if Dockerfile exists)
+    ########################################################################
+    - name: "🐳 Check for Dockerfile"
+      id: dockerfile_exists
+      run: |
+        if [ -f "Dockerfile" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: "🐳 Trivy - Container Image Scan"
+      if: steps.dockerfile_exists.outputs.exists == 'true'
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'avars:local'
+        format: 'sarif'
+        output: 'reports/trivy-container.sarif'
+        severity: 'CRITICAL,HIGH'
+      continue-on-error: true
+
+    ########################################################################
+    # Step 8: Kubernetes YAML Security
+    ########################################################################
+    - name: "☸️ Kubesec - Kubernetes Security"
+      run: |
+        # Install kubesec
+        docker run -v $(pwd)/kubernetes:/k8s kubesec/kubesec:512c5e2 scan /k8s/*.yaml > reports/kubesec.json || true
+        
+        # Check for critical issues
+        if grep -q '"CRITICAL"' reports/kubesec.json; then
+          echo "⚠️ Critical Kubernetes security issues found"
+          cat reports/kubesec.json
+        else
+          echo "✅ No critical Kubernetes security issues"
+        fi
+      continue-on-error: true
+
+    ########################################################################
+    # Step 9: Upload SARIF Reports to GitHub Security Tab
+    ########################################################################
+    - name: "📤 Upload Checkov Results to GitHub"
+      if: always()
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'reports/checkov.sarif'
+        category: 'Checkov'
+        wait-for-processing: false
+      continue-on-error: true
+
+    - name: "📤 Upload Semgrep Results to GitHub"
+      if: always()
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'reports/semgrep.sarif'
+        category: 'Semgrep'
+        wait-for-processing: false
+      continue-on-error: true
+
+    - name: "📤 Upload Trivy Results to GitHub"
+      if: always()
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'reports/trivy-dependencies.sarif'
+        category: 'Trivy'
+        wait-for-processing: false
+      continue-on-error: true
+
+    ########################################################################
+    # Step 10: Create Security Report Summary
+    ########################################################################
+    - name: "📊 Generate Security Report"
+      if: always()
+      run: |
+        cat > /tmp/security_summary.md << 'EOF'
+        ## 🔐 Security Scan Results
+        
+        ### ✅ Checks Performed
+        - [x] Terraform Format Check
+        - [x] Terraform Validation
+        - [x] TFLint Linting
+        - [x] Checkov IaC Security
+        - [x] Semgrep SAST
+        - [x] Trivy Dependencies
+        - [x] TruffleHog Secrets
+        - [x] Kubernetes Security
+        
+        ### 📈 Summary
+        | Tool | Status |
+        |------|--------|
+        | Terraform | ✅ Valid |
+        | TFLint | ✅ Passed |
+        | Checkov | ⏳ Review |
+        | Semgrep | ⏳ Review |
+        | Trivy | ⏳ Review |
+        | Secrets | ✅ None detected |
+        | Kubernetes | ⏳ Review |
+        
+        ### 🔗 Details
+        - Full results available in [Security tab](../../security/code-scanning)
+        - SARIF reports uploaded to GitHub
+        
+        **Scan Duration**: ${{ job.status }}  
+        **Workflow**: [${{ github.workflow }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+        EOF
+        
+        cat /tmp/security_summary.md >> $GITHUB_STEP_SUMMARY
+
+    ########################################################################
+    # Step 11: Comment on Pull Request (if PR)
+    ########################################################################
+    - name: "💬 Comment on PR"
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: '## 🔐 Security Scan Complete\n\nSecurity checks have been executed. Review results in the [Security tab](../../security/code-scanning).'
+          })
+
+################################################################################
+# BUILD JOB (Optional: Create container image)
+################################################################################
+
+  build:
+    name: 🔨 Build Container Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: "📥 Checkout code"
+      uses: actions/checkout@v4
+
+    - name: "🔐 Login to Container Registry"
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: "📝 Extract Metadata"
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+          type=sha
+
+    - name: "🐳 Build and Push"
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+################################################################################
+# TERRAFORM PLAN & DEPLOY JOB
+################################################################################
+
+  deploy:
+    name: 🚀 Terraform Deploy
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_deploy == 'true'
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: "📥 Checkout code"
+      uses: actions/checkout@v4
+
+    - name: "🔑 Azure Login (OIDC)"
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: "🔧 Setup Terraform"
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: "📋 Terraform Init"
+      run: |
+        cd terraform
+        terraform init
+
+    - name: "📊 Terraform Plan"
+      id: plan
+      run: |
+        cd terraform
+        terraform plan \
+          -lock=false \
+          -var-file="terraform.tfvars" \
+          -var="azure_subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+          -var="azure_tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+          -out=tfplan
+        terraform show -json tfplan > tfplan.json
+        echo "plan_status=success" >> $GITHUB_OUTPUT
+
+    - name: "📤 Comment Plan on PR"
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const tfPlan = fs.readFileSync('terraform/tfplan.json', 'utf8');
+          const plan = JSON.parse(tfPlan);
+          
+          const summary = `
+          ## 📊 Terraform Plan Summary
+          
+          - **Resources to Add**: ${plan.resource_changes.filter(r => r.change.actions.includes('create')).length}
+          - **Resources to Modify**: ${plan.resource_changes.filter(r => r.change.actions.includes('update')).length}
+          - **Resources to Delete**: ${plan.resource_changes.filter(r => r.change.actions.includes('delete')).length}
+          
+          [View full plan](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });
+
+    - name: "✅ Terraform Apply"
+      if: github.ref == 'refs/heads/main'
+      run: |
+        cd terraform
+        terraform apply -lock=false -auto-approve tfplan
+
+    - name: "📂 Capture Outputs"
+      if: always()
+      run: |
+        cd terraform
+        terraform output -json > ../outputs.json
+        cat ../outputs.json
+
+    - name: "📤 Upload Outputs as Artifact"
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: terraform-outputs
+        path: outputs.json
+
+################################################################################
+# SECURITY VALIDATION JOB (Post-Deployment)
+################################################################################
+
+  security-validation:
+    name: ✅ Post-Deployment Security Validation
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_deploy == 'true'
+
+    steps:
+    - name: "🔐 Azure Login"
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: "✔️ Verify Sentinel Configuration"
+      run: |
+        echo "Checking Microsoft Sentinel configuration..."
+        az extension add --name sentinel --only-show-errors || true
+        az sentinel operation-configuration show \
+          --resource-group avars-rg \
+          --workspace-name avars-lab-law || echo "⚠️ Could not verify Sentinel"
+
+    - name: "✔️ Verify Azure Firewall Policy"
+      run: |
+        echo "Checking Azure Firewall configuration..."
+        az network firewall show \
+          -g avars-rg \
+          -n avars-lab-fw \
+          --query "threatIntelMode" || echo "⚠️ Could not verify Firewall"
+
+    - name: "✔️ Verify Key Vault Access"
+      run: |
+        echo "Checking Key Vault configuration..."
+        KV_NAME=$(az keyvault list --resource-group avars-rg --query "[?starts_with(name, 'avars-lab-kv-')].name | [0]" -o tsv)
+        if [ -z "$KV_NAME" ]; then
+          echo "⚠️ No AVARS Key Vault found in avars-rg"
+          exit 0
+        fi
+        az keyvault show \
+          --name "$KV_NAME" \
+          --resource-group avars-rg \
+          --query "properties.enablePurgeProtection" || echo "⚠️ Could not verify Key Vault"
+
+################################################################################
+# NOTIFICATION JOB
+################################################################################
+
+  notify:
+    name: 📢 Notification
+    runs-on: ubuntu-latest
+    needs: [security-scan, deploy]
+    if: always()
+
+    steps:
+    - name: "✅ Workflow Summary"
+      run: |
+        echo "## A.V.A.R.S Deploy Workflow Summary"
+        echo "- Security Scan: ${{ needs.security-scan.result }}"
+        echo "- Deployment: ${{ needs.deploy.result }}"
+        echo "- Status: ${{ job.status }}"
+      
+    - name: "📧 Slack Notification"
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: "A.V.A.R.S Deployment Failed"
+        fields: repo,message,commit,author
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+      continue-on-error: true

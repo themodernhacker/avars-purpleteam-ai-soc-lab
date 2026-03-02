@@ -1,0 +1,20 @@
+{
+  "kind": "Scheduled",
+  "properties": {
+    "displayName": "AVARS - Whitelist-Aware Firewall Threat Detection",
+    "description": "Detect repeated suspicious firewall activity while suppressing known-safe IPs from watchlist ip_whitelist.",
+    "enabled": true,
+    "query": "// False-positive suppression using Sentinel Watchlist (ip_whitelist)\n// Create watchlist in Sentinel with SearchKey column containing approved/safe source IP addresses.\nlet SafeSourceIPs =\n    _GetWatchlist('ip_whitelist')\n    | project SafeIP = tostring(searchKey);\n\nAzureDiagnostics\n| where ResourceType =~ \"AZUREFIREWALLS\"\n| where TimeGenerated > ago(15m)\n| extend SourceIP = tostring(split(msg_s, \":\")[0])\n| where isnotempty(SourceIP)\n| where SourceIP !in (SafeSourceIPs)\n| summarize AttemptCount = count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by SourceIP\n| where AttemptCount >= 5\n| order by AttemptCount desc\n",
+    "queryFrequency": "PT5M",
+    "queryPeriod": "PT30M",
+    "severity": "High",
+    "triggerOperator": "GreaterThan",
+    "triggerThreshold": 0,
+    "suppressionDuration": "PT1H",
+    "suppressionEnabled": false,
+    "tactics": [
+      "InitialAccess",
+      "CredentialAccess"
+    ]
+  }
+}

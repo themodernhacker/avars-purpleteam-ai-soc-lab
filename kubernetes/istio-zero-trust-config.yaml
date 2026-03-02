@@ -1,0 +1,441 @@
+# =============================================================================
+# Istio Service Mesh Configuration
+# Enables mTLS (mutual TLS) for zero-trust service-to-service communication
+# =============================================================================
+
+---
+# =============================================================================
+# 1. PEER AUTHENTICATION - Enforce mTLS Globally
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: honeypot
+spec:
+  # STRICT = Enforce mTLS for ALL traffic in this namespace
+  mtls:
+    mode: STRICT
+  
+  # Port-level overrides (if needed)
+  portLevelMtls:
+    3000:    # Juice Shop port
+      mode: STRICT
+    2222:    # SSH honeypot port
+      mode: STRICT
+
+---
+# =============================================================================
+# 2. REQUEST AUTHENTICATION - JWT Validation (Optional)
+# For API-level authentication using bearer tokens
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: RequestAuthentication
+metadata:
+  name: jwt-auth
+  namespace: honeypot
+spec:
+  jwtRules:
+  # Azure Entra ID tokens
+  - issuer: "https://login.microsoftonline.com/{tenant-id}/v2.0"
+    jwksUri: "https://login.microsoftonline.com/{tenant-id}/discovery/v2.0/keys"
+    audiences:
+    - "api://juice-shop"
+    forwardOriginalToken: true
+  
+  # Google tokens (alternative)
+  - issuer: "https://accounts.google.com"
+    jwksUri: "https://www.googleapis.com/oauth2/v3/certs"
+    audiences:
+    - "juice-shop.example.com"
+
+---
+# =============================================================================
+# 3. AUTHORIZATION POLICY - Fine-Grained Access Control
+# Define which workloads can communicate with which
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: juice-shop-authz
+  namespace: honeypot
+spec:
+  # Apply to pods with label app=juice-shop
+  selector:
+    matchLabels:
+      app: juice-shop
+
+  # Default action: DENY ALL (deny-by-default model)
+  action: DENY
+
+  # Rule 1: Allow health checks from probes
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/kube-system/sa/kubelet"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/*"]
+    when:
+    - key: request.headers[user-agent]
+      values: ["kube-probe*"]
+
+  ---
+  # Rule 2: Allow traffic from SSH honeypot to Juice Shop
+  - from:
+    - source:
+        principals: ["cluster.local/ns/honeypot/sa/honeypot-sa"]
+        namespaces: ["honeypot"]
+    to:
+    - operation:
+        methods: ["GET", "POST", "PUT", "DELETE"]
+        paths: ["/api/*", "/rest/*"]
+    ports:
+    - "3000"
+
+  ---
+  # Rule 3: Allow outbound to external APIs (network egress)
+  - to:
+    - operation:
+        methods: ["GET", "POST"]
+        hosts: ["*.azurewebsites.net", "*.servicebus.windows.net"]
+    ports:
+    - "443"
+
+  ---
+  # Rule 4: EXPLICIT DENY for suspicious patterns
+  - from:
+    - source:
+        namespaces: ["default"]  # Pods from default namespace (shouldn't exist)
+    to:
+    - operation:
+        methods: ["*"]
+    when:
+    - key: request.headers[x-forwarded-for]
+      notValues: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+---
+# =============================================================================
+# 4. AUTHORIZATION POLICY - For SSH Honeypot
+# =============================================================================
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: ssh-honeypot-authz
+  namespace: honeypot
+spec:
+  selector:
+    matchLabels:
+      app: ssh-honeypot
+
+  # ALLOW external SSH connections (that's the point of honeypot)
+  action: ALLOW
+
+  rules:
+  # Allow SSH from anywhere (it's a honeypot)
+  - to:
+    - operation:
+        methods: ["*"]
+      ports:
+      - "2222"  # SSH honeypot port
+
+---
+# =============================================================================
+# 5. DESTINATION RULE - Load Balancing & TLS Settings
+# =============================================================================
+
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: juice-shop
+  namespace: honeypot
+spec:
+  host: juice-shop
+  
+  # TLS settings
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL  # Automatic mTLS using Istio certs
+      sni: juice-shop.honeypot.svc.cluster.local
+    
+    # Load balancing
+    loadBalancer:
+      simple: ROUND_ROBIN  # Distribute traffic across replicas
+    
+    # Connection pooling
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 2
+    
+    # Outlier detection (circuit breaker)
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minRequestVolume: 5
+
+  # Subset for canary deployments (optional)
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+
+---
+# =============================================================================
+# 6. VIRTUAL SERVICE - Traffic Management & Routing
+# =============================================================================
+
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: juice-shop
+  namespace: honeypot
+spec:
+  hosts:
+  - juice-shop
+  - juice-shop.honeypot
+  - juice-shop.honeypot.svc.cluster.local
+
+  http:
+  # Route 1: SQL injection detection → v1 (more scrutiny)
+  - match:
+    - queryParams:
+        id:
+          regex: ".*union.*|.*select.*|.*exec.*"  # SQL keywords
+    route:
+    - destination:
+        host: juice-shop
+        port:
+          number: 3000
+        subset: v1
+      weight: 100
+    timeout: 10s
+    retries:
+      attempts: 0  # Don't retry suspicious requests
+
+  # Route 2: Admin endpoints → Require authentication
+  - match:
+    - uri:
+        prefix: /admin
+    - uri:
+        prefix: /api/admin
+    route:
+    - destination:
+        host: juice-shop
+        port:
+          number: 3000
+      timeout: 30s
+    when:
+    - key: request.auth.claims[oid]  # Azure Entra ID user ID
+      notValues: [""]
+
+  # Route 3: API endpoints → Normal routing
+  - match:
+    - uri:
+        prefix: /api
+    route:
+    - destination:
+        host: juice-shop
+        port:
+          number: 3000
+        subset: v1
+      weight: 80
+    - destination:
+        host: juice-shop
+        port:
+          number: 3000
+        subset: v2
+      weight: 20  # Canary: 20% to v2
+    timeout: 10s
+    retries:
+      attempts: 3
+      perTryTimeout: 3s
+
+  # Route 4: Default route
+  - route:
+    - destination:
+        host: juice-shop
+        port:
+          number: 3000
+    timeout: 30s
+
+---
+# =============================================================================
+# 7. TELEMETRY - Monitor mTLS & Service Mesh Health
+# =============================================================================
+
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: custom-metrics
+  namespace: honeypot
+spec:
+  metrics:
+  - level: WORKLOAD_EDGE
+    overrides:
+    - match:
+        workload:
+          labels:
+            app: juice-shop
+      disabled: false
+      
+  - level: WORKLOAD
+    providers:
+    - name: "prometheus"
+    overrides:
+    - match:
+        workload:
+          labels:
+            app: juice-shop
+      disabled: false
+
+  logging:
+  - level: WORKLOAD
+    overrides:
+    - match:
+        workload:
+          labels:
+            app: juice-shop
+      disabled: false
+
+---
+# =============================================================================
+# 8. GATEWAY - Ingress to Honeypot Namespace (Optional)
+# Alternative to LoadBalancer service
+# =============================================================================
+
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: honeypot-gateway
+  namespace: honeypot
+spec:
+  selector:
+    istio: ingressgateway  # Use Istio's default ingress gateway
+  servers:
+  # HTTP (redirect to HTTPS)
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "juice-shop.example.com"
+    httpsRedirect: true
+
+  # HTTPS (TLS)
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: honeypot-tls  # Kubernetes secret
+    hosts:
+    - "juice-shop.example.com"
+
+  # TCP for SSH
+  - port:
+      number: 22
+      name: ssh
+      protocol: TCP
+    hosts:
+    - "ssh-honeypot.example.com"
+
+---
+# =============================================================================
+# 9. NETWORK POLICY - Kubernetes-level (Defense in Depth)
+# Block traffic at network level in addition to Istio policies
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: istio-mtls-enforcement
+  namespace: honeypot
+spec:
+  podSelector: {}  # Apply to all pods
+
+  policyTypes:
+  - Ingress
+  - Egress
+
+  ingress:
+  # Allow Istio control plane
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+    ports:
+    - protocol: TCP
+      port: 15000  # Istiod port
+
+  # Allow inter-pod communication (will be encrypted via Istio)
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 2222
+
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+
+  # Allow external (to Azure Firewall)
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# =============================================================================
+# DEPLOYMENT INSTRUCTIONS
+# =============================================================================
+
+# 1. Install Istio (via Azure Service Mesh add-on in Terraform)
+# terraform apply  # Will install Istio
+
+# 2. Verify Istio installation
+# kubectl get pods -n istio-system
+
+# 3. Enable sidecar injection on namespace
+# kubectl label namespace honeypot istio-injection=enabled
+
+# 4. Apply this configuration
+# kubectl apply -f istio-config.yaml
+
+# 5. Verify mTLS is enabled
+# kubectl logs -n honeypot juice-shop-* -c istio-proxy | grep "mTLS enabled"
+
+# 6. Test mTLS (pod-to-pod encryption)
+# kubectl exec -n honeypot ssh-honeypot-* -- nslookup juice-shop
+# kubectl exec -n honeypot ssh-honeypot-* -- curl -v http://juice-shop:3000/
+
+# 7. Monitor traffic in Kiali dashboard (Istio UI)
+# kubectl port-forward -n istio-system svc/kiali 20000:20000
+# Open http://localhost:20000
+
+# 8. Check authorization policies are enforced
+# kubectl get authorizationpolicies -n honeypot
+# kubectl describe authorizationpolicy juice-shop-authz -n honeypot

@@ -1,0 +1,135 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'avars-security-cluster'
+    environment: 'production'
+    team: 'security-ops'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+      scheme: http
+      timeout: 10s
+
+# Rule files
+rule_files:
+  - '/etc/prometheus/rules.yaml'
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 15s
+
+  # Azure Container Insights (if running on AKS)
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+
+  # Node Exporter (if running on VMs/nodes)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          instance: 'security-node-01'
+    scrape_interval: 30s
+
+  # LSTM Model Metrics (from ML training/inference)
+  - job_name: 'lstm-c2-detector'
+    static_configs:
+      - targets: ['localhost:5000']
+        labels:
+          model: 'lstm_c2_detection'
+          version: '1.0'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Azure Watermark Metrics (custom endpoint)
+  - job_name: 'avars-security-metrics'
+    static_configs:
+      - targets: ['localhost:8080']
+        labels:
+          service: 'avars-security-api'
+    metrics_path: '/prometheus/metrics'
+    scrape_interval: 30s
+
+  # Kubernetes Kubelet (if on AKS)
+  - job_name: 'kubelet'
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+
+  # Azure Monitor Exporter (custom scraper for data export)
+  - job_name: 'azure-monitor-exporter'
+    static_configs:
+      - targets: ['localhost:9100']
+        labels:
+          exporter: 'azure-monitor'
+    scrape_interval: 60s
+
+  # Blackbox Exporter (external endpoint monitoring)
+  - job_name: 'blackbox-external-endpoints'
+    metrics_path: /probe
+    static_configs:
+      - targets:
+          - 'https://api.azure.com'
+          - 'https://graph.microsoft.com'
+          - 'https://management.azure.com'
+        labels:
+          service: 'azure-api'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'localhost:9115'
+
+  # Custom Log Analytics Exporter
+  - job_name: 'log-analytics-metrics'
+    static_configs:
+      - targets: ['localhost:8888']
+        labels:
+          workspace: 'avars-log-analytics'
+    metrics_path: '/api/query'
+    scrape_interval: 5m
+
+# Service discovery for dynamic targets (if using Kubernetes)
+# Uncomment if deploying on AKS:
+# 
+# - job_name: 'kubernetes-pods'
+#   kubernetes_sd_configs:
+#     - role: pod
+#   relabel_configs:
+#     - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+#       action: keep
+#       regex: true
+#     - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+#       action: replace
+#       target_label: __metrics_path__
+#       regex: (.+)
+#     - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+#       action: replace
+#       regex: ([^:]+)(?::\d+)?;(\d+)
+#       replacement: $1:$2
+#       target_label: __address__

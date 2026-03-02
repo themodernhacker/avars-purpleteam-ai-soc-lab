@@ -1,0 +1,381 @@
+{
+  "contentVersion": "1.0.0.0",
+  "triggers": {
+    "when_a_Security_Recommendation_alert_is_triggered": {
+      "type": "ApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['microsoftsentinel']['connectionId']"
+          }
+        },
+        "body": {
+          "callback_url": "@{listCallbackUrl()}"
+        },
+        "path": "/subscribe",
+        "queries": {
+          "alertRuleConnectorName": "Defender for Cloud - Security Recommendations"
+        }
+      },
+      "runtimeConfiguration": {
+        "concurrency": {
+          "runs": 1
+        }
+      }
+    }
+  },
+  "actions": {
+    "Parse_Defender_Recommendation": {
+      "runAfter": {
+        "when_a_Security_Recommendation_alert_is_triggered": ["Succeeded"]
+      },
+      "type": "ParseJson",
+      "inputs": {
+        "content": "@triggerBody()?['object']",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "RecommendationId": { "type": "string" },
+            "RecommendationName": { "type": "string" },
+            "RecommendationDescription": { "type": "string" },
+            "ResourceId": { "type": "string" },
+            "Severity": { "type": "string" },
+            "RemediationSteps": { "type": "string" },
+            "RecommendationState": { "type": "string" }
+          }
+        }
+      }
+    },
+    "Extract_Resource_Details": {
+      "runAfter": {
+        "Parse_Defender_Recommendation": ["Succeeded"]
+      },
+      "type": "Compose",
+      "inputs": {
+        "recommendationId": "@body('Parse_Defender_Recommendation')?['RecommendationId']",
+        "recommendationName": "@body('Parse_Defender_Recommendation')?['RecommendationName']",
+        "resourceId": "@body('Parse_Defender_Recommendation')?['ResourceId']",
+        "severity": "@body('Parse_Defender_Recommendation')?['Severity']",
+        "description": "@body('Parse_Defender_Recommendation')?['RecommendationDescription']",
+        "remediationSteps": "@body('Parse_Defender_Recommendation')?['RemediationSteps']"
+      }
+    },
+    "Check_Severity_Level": {
+      "runAfter": {
+        "Extract_Resource_Details": ["Succeeded"]
+      },
+      "type": "Switch",
+      "expression": "@body('Extract_Resource_Details')['severity']",
+      "cases": {
+        "Critical": {
+          "case": "Critical",
+          "actions": {
+            "Auto_Remediate_Critical": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azureopenai']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/deployments/@{encodeURIComponent('gpt-4o')}/chat/completions",
+                "queries": {
+                  "api-version": "2024-02-15-preview"
+                },
+                "body": {
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": "You are a Terraform expert specializing in Azure infrastructure remediation. When given a Defender for Cloud security recommendation, you generate production-ready Terraform code to fix the vulnerability.\n\nRules:\n1. Use azurerm provider (version ~> 3.0)\n2. Include all required attributes\n3. Add comments explaining the security fix\n4. Make code idempotent\n5. Return ONLY the Terraform HCL code (no explanations)"
+                    },
+                    {
+                      "role": "user",
+                      "content": "Azure Defender for Cloud Security Recommendation:\n\nRecommendation ID: @{body('Extract_Resource_Details')['recommendationId']}\nRecommendation Name: @{body('Extract_Resource_Details')['recommendationName']}\nResource ID: @{body('Extract_Resource_Details')['resourceId']}\nSeverity: @{body('Extract_Resource_Details')['severity']}\nDescription: @{body('Extract_Resource_Details')['description']}\nRemediation Steps: @{body('Extract_Resource_Details')['remediationSteps']}\n\nGenerate a Terraform remediation script to fix this issue."
+                    }
+                  ],
+                  "max_tokens": 2000,
+                  "temperature": 0.2
+                }
+              },
+              "runtimeConfiguration": {
+                "secureData": {
+                  "properties": ["/inputs/body/messages"]
+                }
+              }
+            }
+          }
+        },
+        "High": {
+          "case": "High",
+          "actions": {
+            "Auto_Remediate_High": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azureopenai']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/deployments/@{encodeURIComponent('gpt-4o')}/chat/completions",
+                "queries": {
+                  "api-version": "2024-02-15-preview"
+                },
+                "body": {
+                  "messages": [
+                    {
+                      "role": "system",
+                      "content": "You are a Terraform expert. Generate Azure infrastructure remediation code for this security issue."
+                    },
+                    {
+                      "role": "user",
+                      "content": "Defender for Cloud Recommendation:\nName: @{body('Extract_Resource_Details')['recommendationName']}\nResource: @{body('Extract_Resource_Details')['resourceId']}\nDescription: @{body('Extract_Resource_Details')['description']}\n\nGenerate Terraform to remediate this."
+                    }
+                  ],
+                  "max_tokens": 1500,
+                  "temperature": 0.2
+                }
+              }
+            }
+          }
+        },
+        "Medium": {
+          "case": "Medium",
+          "actions": {
+            "Log_Medium_Recommendation": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "connection": {
+                    "name": "@parameters('$connections')['azuremonitor']['connectionId']"
+                  }
+                },
+                "method": "post",
+                "path": "/subscriptions/@{encodeURIComponent(subscription().subscriptionId)}/resourcegroups/@{encodeURIComponent(resourceGroup().name)}/providers/microsoft.insights/diagnosticSettings/@{encodeURIComponent('defender-medium-recommendations')}",
+                "body": {
+                  "properties": {
+                    "logs": [
+                      {
+                        "category": "DefenderForCloud",
+                        "enabled": true
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "default": {
+        "actions": {
+          "Log_Low_Severity": {
+            "type": "Compose",
+            "inputs": "Low severity recommendation logged"
+          }
+        }
+      }
+    },
+    "Extract_Terraform_Code": {
+      "runAfter": {
+        "Check_Severity_Level": ["Succeeded"]
+      },
+      "type": "ParseJson",
+      "inputs": {
+        "content": "@body('Auto_Remediate_Critical')['choices'][0]['message']['content']",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    "Generate_Remediation_Filename": {
+      "runAfter": {
+        "Extract_Terraform_Code": ["Succeeded"]
+      },
+      "type": "Compose",
+      "inputs": "remediation_@{body('Extract_Resource_Details')['recommendationId']}_@{utcNow('yyyyMMdd_HHmmss')}.tf"
+    },
+    "Save_Terraform_to_Storage": {
+      "runAfter": {
+        "Generate_Remediation_Filename": ["Succeeded"]
+      },
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['azureblob']['connectionId']"
+          }
+        },
+        "method": "put",
+        "path": "/v2/datasets/@{encodeURIComponent('avarsremediation')}/files/@{encodeURIComponent('remediation-scripts/')}{@{outputs('Generate_Remediation_Filename')}}",
+        "body": "@body('Extract_Terraform_Code')",
+        "headers": {
+          "Content-Type": "text/plain"
+        }
+      }
+    },
+    "Create_Sentinel_Incident": {
+      "runAfter": {
+        "Save_Terraform_to_Storage": ["Succeeded"]
+      },
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['microsoftsentinel']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/Incidents/Create",
+        "body": {
+          "IncidentName": "Auto-Remediation: @{body('Extract_Resource_Details')['recommendationName']}",
+          "Severity": "@{body('Extract_Resource_Details')['severity']}",
+          "AlertName": "Defender for Cloud Security Recommendation",
+          "Description": "Defender for Cloud detected a security recommendation.\n\n**Recommendation**: @{body('Extract_Resource_Details')['recommendationName']}\n\n**Resource**: @{body('Extract_Resource_Details')['resourceId']}\n\n**Severity**: @{body('Extract_Resource_Details')['severity']}\n\n**Description**: @{body('Extract_Resource_Details')['description']}\n\n**Auto-Generated Terraform Remediation**: See attachment\n\n**Next Steps**: \n1. Review the auto-generated Terraform script\n2. Test in dev environment\n3. Approve and apply with `terraform apply`",
+          "Classification": "TruePositive"
+        }
+      }
+    },
+    "Attach_Terraform_Script_to_Incident": {
+      "runAfter": {
+        "Create_Sentinel_Incident": ["Succeeded"]
+      },
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['microsoftsentinel']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/Incidents/@{encodeURIComponent(body('Create_Sentinel_Incident')?['properties']?['incidentNumber'])}/Attachments",
+        "body": {
+          "FileName": "@{outputs('Generate_Remediation_Filename')}",
+          "FileData": "@{body('Extract_Terraform_Code')}",
+          "ContentType": "text/plain"
+          }
+      }
+    },
+    "Log_Remediation_Completion": {
+      "runAfter": {
+        "Attach_Terraform_Script_to_Incident": ["Succeeded"]
+      },
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['azuremonitor']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/subscriptions/@{encodeURIComponent(subscription().subscriptionId)}/resourcegroups/@{encodeURIComponent(resourceGroup().name)}/providers/microsoft.insights/logs",
+        "body": {
+          "resourceId": "@{body('Extract_Resource_Details')['resourceId']}",
+          "remediation_status": "COMPLETED",
+          "recommendation_id": "@{body('Extract_Resource_Details')['recommendationId']}",
+          "terraform_script_saved": true,
+          "timestamp": "@{utcNow()}"
+        }
+      }
+    },
+    "Send_Slack_Notification": {
+      "runAfter": {
+        "Log_Remediation_Completion": ["Succeeded"]
+      },
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['slack']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/chat.postMessage",
+        "body": {
+          "channel": "#security-team",
+          "text": "🔧 Defender for Cloud Auto-Remediation",
+          "blocks": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": "🔧 Defender for Cloud Auto-Remediation Completed"
+              }
+            },
+            {
+              "type": "section",
+              "fields": [
+                {
+                  "type": "mrkdwn",
+                  "text": "*Recommendation*\n@{body('Extract_Resource_Details')['recommendationName']}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Severity*\n@{body('Extract_Resource_Details')['severity']}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Resource*\n@{body('Extract_Resource_Details')['resourceId']}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Status*\n✅ Terraform Generated"
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Description*\n@{body('Extract_Resource_Details')['description']}"
+              }
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "View Sentinel Incident"
+                  },
+                  "url": "https://portal.azure.com/#asset/Microsoft_OperationsManagementSuite_Workspace/Blade/Microsoft_Azure_Security_Insights/IncidentsBlade",
+                  "style": "primary"
+                },
+                {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "Download Terraform"
+                  },
+                  "url": "https://portal.azure.com/#view/StorageAccount/FileShareView"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "outputs": {
+    "RemediationStatus": {
+      "type": "String",
+      "value": "COMPLETED"
+    },
+    "TerraformScriptLocation": {
+      "type": "String",
+      "value": "@{outputs('Generate_Remediation_Filename')}"
+    },
+    "SentinelIncidentId": {
+      "type": "String",
+      "value": "@{body('Create_Sentinel_Incident')?['properties']?['incidentNumber']}"
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    }
+  }
+}

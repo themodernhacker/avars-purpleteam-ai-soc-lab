@@ -1,0 +1,303 @@
+{
+  "contentVersion": "1.0.0.0",
+  "triggers": {
+    "when_LSTM_C2_detection_fires": {
+      "type": "ApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['microsoftsentinel']['connectionId']"
+          }
+        },
+        "body": {
+          "callback_url": "@{listCallbackUrl()}"
+        },
+        "path": "/subscribe",
+        "queries": {
+          "alertRuleConnectorName": "LSTM_C2_Detection"
+        }
+      }
+    }
+  },
+  "actions": {
+    "Parse_LSTM_Alert": {
+      "runAfter": {
+        "when_LSTM_C2_detection_fires": ["Succeeded"]
+      },
+      "type": "ParseJson",
+      "inputs": {
+        "content": "@triggerBody()?['object']",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "AlertName": { "type": "string" },
+            "AlertSeverity": { "type": "string" },
+            "SourceIp": { "type": "string" },
+            "TargetAccount": { "type": "string" },
+            "C2Probability": { "type": "number" },
+            "C2Confidence": { "type": "number" },
+            "DeviceId": { "type": "string" },
+            "ProcessId": { "type": "string" },
+            "TimeGenerated": { "type": "string" }
+          }
+        }
+      }
+    },
+    "Check_C2_Confidence_Level": {
+      "runAfter": {
+        "Parse_LSTM_Alert": ["Succeeded"]
+      },
+      "type": "Condition",
+      "expression": {
+        "and": [
+          {
+            "greaterOrEquals": [
+              "@body('Parse_LSTM_Alert')?['C2Probability']",
+              0.8
+            ]
+          }
+        ]
+      },
+      "actions": {
+        "C2_Confirmed_Initiate_Response": {
+          "runAfter": {},
+          "type": "Compose",
+          "inputs": "C2 detection confidence >= 0.80 - INITIATING FULL RESPONSE PROTOCOL"
+        },
+        "Step_1_Disable_User_Account": {
+          "runAfter": {
+            "C2_Confirmed_Initiate_Response": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftgraph']['connectionId']"
+              }
+            },
+            "method": "patch",
+            "path": "/v1.0/users/@{encodeURIComponent(body('Parse_LSTM_Alert')?['TargetAccount'])}",
+            "body": {
+              "accountEnabled": false,
+              "mail": "@body('Parse_LSTM_Alert')?['TargetAccount']",
+              "createdDateTime": "@utcNow()"
+            }
+          },
+          "runtimeConfiguration": {
+            "secureData": {
+              "properties": ["/inputs/body"]
+            }
+          }
+        },
+        "Step_2_Revoke_All_Sessions": {
+          "runAfter": {
+            "Step_1_Disable_User_Account": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftgraph']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v1.0/users/@{encodeURIComponent(body('Parse_LSTM_Alert')?['TargetAccount'])}/revokeSignInSessions",
+            "body": {}
+          }
+        },
+        "Step_3_Force_Password_Reset": {
+          "runAfter": {
+            "Step_2_Revoke_All_Sessions": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftgraph']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v1.0/users/@{encodeURIComponent(body('Parse_LSTM_Alert')?['TargetAccount'])}/changePassword",
+            "body": {
+              "currentPassword": "TempPassword@123!@#",
+              "newPassword": "@{guid()}"
+            }
+          }
+        },
+        "Step_4_Query_MDE_Device": {
+          "runAfter": {
+            "Step_3_Force_Password_Reset": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftgraph']['connectionId']"
+              }
+            },
+            "method": "get",
+            "path": "/beta/security/deviceIsolation/devices",
+            "queries": {
+              "$filter": "deviceName eq '@{body('Parse_LSTM_Alert')?['TargetAccount']}'"
+            }
+          }
+        },
+        "Step_5_Isolate_Device_at_Network_Level": {
+          "runAfter": {
+            "Step_4_Query_MDE_Device": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftgraph']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/beta/security/deviceIsolation/@{encodeURIComponent(body('Step_4_Query_MDE_Device')?['value'][0]?['id'])}",
+            "body": {
+              "isolationType": "Full",
+              "reason": "C2 Command & Control Detected - LSTM Confidence @{body('Parse_LSTM_Alert')?['C2Probability']}",
+              "comment": "Automated response: Isolate endpoint due to confirmed C2 heartbeat from @{body('Parse_LSTM_Alert')?['SourceIp']}"
+            }
+          },
+          "runtimeConfiguration": {
+            "timeout": "PT5M"
+          }
+        },
+        "Step_6_Block_Source_IP_at_Firewall": {
+          "runAfter": {
+            "Step_5_Isolate_Device_at_Network_Level": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['azurefirewall']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/subscriptions/@{encodeURIComponent(subscription().subscriptionId)}/resourceGroups/avars-rg/providers/Microsoft.Network/azureFirewalls/avars-firewall/rules",
+            "body": {
+              "name": "BLOCK_C2_SOURCE_@{replace(body('Parse_LSTM_Alert')?['SourceIp'], '.', '_')}",
+              "priority": 100,
+              "direction": "Inbound",
+              "access": "Deny",
+              "protocol": "TCP",
+              "sourceAddresses": [
+                "@{body('Parse_LSTM_Alert')?['SourceIp']}"
+              ],
+              "destinationPorts": [
+                "*"
+              ],
+              "destinationAddresses": [
+                "*"
+              ]
+            }
+          }
+        },
+        "Step_7_Generate_AI_Compliance_Report": {
+          "runAfter": {
+            "Step_6_Block_Source_IP_at_Firewall": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['azureopenai']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/deployments/@{encodeURIComponent('gpt-4o')}/chat/completions",
+            "queries": {
+              "api-version": "2024-02-15-preview"
+            },
+            "body": {
+              "messages": [
+                {
+                  "role": "system",
+                  "content": "You are a CISO-level security compliance analyst. Generate a formal incident report mapping C2 detection to regulatory controls (NIST SP 800-53, ISO 27001). Include:\n1. Executive Summary\n2. Technical Details\n3. Compliance Control Mapping\n4. Remediation Actions Taken\n5. Risk Assessment\n6. Regulatory Impact"
+                },
+                {
+                  "role": "user",
+                  "content": "INCIDENT REPORT: C2 Command & Control Traffic Detected\n\nIncident Details:\n- Alert Name: @{body('Parse_LSTM_Alert')?['AlertName']}\n- C2 Probability: @{body('Parse_LSTM_Alert')?['C2Probability']}\n- Source IP: @{body('Parse_LSTM_Alert')?['SourceIp']}\n- Target Account: @{body('Parse_LSTM_Alert')?['TargetAccount']}\n- Device ID: @{body('Parse_LSTM_Alert')?['DeviceId']}\n- Detection Time: @{body('Parse_LSTM_Alert')?['TimeGenerated']}\n\nAutomated Response Actions:\n1. ✅ User account disabled\n2. ✅ All sessions revoked\n3. ✅ Password reset (forced)\n4. ✅ Device isolated (network isolation set to 'Full')\n5. ✅ Source IP blocked at Azure Firewall\n\nGenerate formal compliance audit report."
+                }
+              ],
+              "max_tokens": 2000,
+              "temperature": 0.3
+            }
+          }
+        },
+        "Step_8_Update_Sentinel_Incident": {
+          "runAfter": {
+            "Step_7_Generate_AI_Compliance_Report": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['microsoftsentinel']['connectionId']"
+              }
+            },
+            "method": "patch",
+            "path": "/Incidents/@{encodeURIComponent(triggerBody()?['properties']?['incidentNumber'])}",
+            "body": {
+              "Classification": "TruePositive",
+              "ClassificationReason": "ConfirmedUserInitiated",
+              "Description": "🚨 CRITICAL C2 DETECTION - AUTOMATED RESPONSE EXECUTED\n\n**Detection Info:**\n- Alert: @{body('Parse_LSTM_Alert')?['AlertName']}\n- LSTM Confidence: @{body('Parse_LSTM_Alert')?['C2Probability']}\n- Source IP: @{body('Parse_LSTM_Alert')?['SourceIp']}\n- User: @{body('Parse_LSTM_Alert')?['TargetAccount']}\n\n**Automated Actions Completed:**\n1. ✅ User Account Disabled - @{body('Step_1_Disable_User_Account')?['id']}\n2. ✅ Sessions Revoked - All active sessions terminated\n3. ✅ Password Reset - Forced new password\n4. ✅ Device Isolated - Network isolation FULL enabled\n5. ✅ Firewall Rule Added - Source IP @{body('Parse_LSTM_Alert')?['SourceIp']} BLOCKED\n6. ✅ Compliance Report Generated - See attached\n\n**Next Steps:**\n- Incident Commander: Review and approve all actions\n- Forensics: Preserve logs for investigation\n- Compliance: Submit audit report for regulatory review\n\n**Compliance Audit Report:**\n@{body('Step_7_Generate_AI_Compliance_Report')?['choices'][0]?['message']?['content']}",
+              "Status": "Active"
+            }
+          }
+        },
+        "Step_9_Send_Executive_Alert": {
+          "runAfter": {
+            "Step_8_Update_Sentinel_Incident": ["Succeeded"]
+          },
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['teams']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v1.0/teams/@{encodeURIComponent('AVARS-SecurityOps')}/channels/@{encodeURIComponent('incident-commander')}/messages",
+            "body": {
+              "body": {
+                "contentType": "html",
+                "content": "<h1>🚨 CRITICAL: C2 Command & Control Detected & Auto-Isolated</h1><p><strong>Alert Time:</strong> @{body('Parse_LSTM_Alert')?['TimeGenerated']}</p><p><strong>LSTM Confidence:</strong> @{body('Parse_LSTM_Alert')?['C2Probability']}%</p><p><strong>Affected User:</strong> @{body('Parse_LSTM_Alert')?['TargetAccount']}</p><p><strong>Source IP:</strong> @{body('Parse_LSTM_Alert')?['SourceIp']}</p><p><strong>Status:</strong> ✅ All automated response actions completed</p><p><strong>Device Status:</strong> 🔒 ISOLATED (Network isolation enabled)</p><p><strong>Account Status:</strong> 🚫 DISABLED</p>"
+              }
+            }
+          }
+        }
+      }
+    },
+    "C2_Probability_Below_Threshold": {
+      "runAfter": {
+        "Check_C2_Confidence_Level": ["Failed"]
+      },
+      "type": "Compose",
+      "inputs": "C2 confidence < 0.80 - Alert logged but no automated response triggered"
+    }
+  },
+  "outputs": {
+    "IncidentStatus": {
+      "type": "String",
+      "value": "INCIDENT_RESPONSE_COMPLETED"
+    },
+    "DeviceIsolationStatus": {
+      "type": "String",
+      "value": "@{outputs('Step_5_Isolate_Device_at_Network_Level')}"
+    },
+    "ComplianceReportGenerated": {
+      "type": "Boolean",
+      "value": true
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    }
+  }
+}

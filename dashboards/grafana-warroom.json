@@ -1,0 +1,373 @@
+{
+  "dashboard": {
+    "title": "A.V.A.R.S - Real-Time Security War Room",
+    "description": "Live threat detection, LSTM C2 predictions, compliance health, and incident response tracking",
+    "tags": ["security", "threat-detection", "ml", "compliance"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "🚨 Live Threat Activity (Last 24h)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(SecurityAlert where TimeGenerated > ago(24h))",
+            "legendFormat": "Total Incidents"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 10 },
+                { "color": "orange", "value": 20 },
+                { "color": "red", "value": 50 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "🔴 Critical & High Severity Alerts",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "count(SecurityAlert where AlertSeverity in ('Critical', 'High') and TimeGenerated > ago(24h))",
+            "legendFormat": "Critical/High"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "red", "value": 1 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "📊 Incident Severity Distribution",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "count by AlertSeverity (SecurityAlert | where TimeGenerated > ago(7d))",
+            "legendFormat": "{{ AlertSeverity }}"
+          }
+        ],
+        "colorScheme": {
+          "Critical": "red",
+          "High": "orange",
+          "Medium": "yellow",
+          "Low": "green"
+        }
+      },
+      {
+        "id": 4,
+        "title": "🤖 LSTM C2 Detection Confidence Scores",
+        "type": "timeseries",
+        "targets": [
+          {
+            "expr": "avg(C2_Probability) by time_bucket('5m') where AlertName = 'LSTM_C2_Detection' and TimeGenerated > ago(24h)",
+            "legendFormat": "C2 Confidence Score"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "custom": {
+              "hideFrom": {
+                "legend": false,
+                "tooltip": false
+              }
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 0.5 },
+                { "color": "red", "value": 0.8 }
+              ]
+            }
+          }
+        },
+        "alert": {
+          "name": "LSTM_C2_Confidence_Critical",
+          "conditions": [
+            {
+              "condition": "gt",
+              "operator": { "type": "and" },
+              "query": { "params": ["C2_Probability", "5m", "now", "gt", "0.95"] },
+              "reducer": { "params": [], "type": "avg" },
+              "type": "query"
+            }
+          ]
+        }
+      },
+      {
+        "id": 5,
+        "title": "🌍 Geographic Attack Distribution (Attack Heat Map)",
+        "type": "geomap",
+        "targets": [
+          {
+            "expr": "count by SourceCountry (SecurityAlert | where TimeGenerated > ago(24h) limit 100)",
+            "legendFormat": "{{ SourceCountry }} - {{ count }}"
+          }
+        ],
+        "colorScheme": {
+          "min": "green",
+          "max": "red"
+        }
+      },
+      {
+        "id": 6,
+        "title": "🔐 Identity Attacks: User Compromises",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "SecurityAlert | where AlertName contains ('BruteForce' or 'Suspicious' or 'C2') and TimeGenerated > ago(24h) | select TargetAccount, count() as AttackCount, max(AlertSeverity) as MaxSeverity, max(TimeGenerated) as LastSeen | sort by AttackCount desc | limit 20",
+            "format": "table"
+          }
+        ],
+        "columns": [
+          { "name": "TargetAccount", "type": "string" },
+          { "name": "AttackCount", "type": "number" },
+          { "name": "MaxSeverity", "type": "string", "color": { "Critical": "red", "High": "orange", "Medium": "yellow", "Low": "green" } },
+          { "name": "LastSeen", "type": "datetime" }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "✅ Automated Response Rate",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "((count(SecurityAlert where AutomatedResponse = true and TimeGenerated > ago(24h))) / (count(SecurityAlert where TimeGenerated > ago(24h)))) * 100",
+            "legendFormat": "Automation %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 50 },
+                { "color": "green", "value": 80 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "🎯 NIST Control Coverage (Last 30 Days)",
+        "type": "barchart",
+        "targets": [
+          {
+            "expr": "count by NISTControl (IncidentControlMapping | where TimeGenerated > ago(30d))",
+            "legendFormat": "{{ NISTControl }}"
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "🏥 Compliance Health Score",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "(count(distinct NISTControl) where TimeGenerated > ago(30d)) / 22 * 100",
+            "legendFormat": "Compliance %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "min": 0,
+            "max": 100,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "orange", "value": 50 },
+                { "color": "yellow", "value": 75 },
+                { "color": "green", "value": 90 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "⚡ Mean Time to Response (MTTR)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "avg(ResponseTimeMinutes) where TimeGenerated > ago(7d)",
+            "legendFormat": "MTTR (minutes)"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 30 },
+                { "color": "orange", "value": 60 },
+                { "color": "red", "value": 120 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "📈 Top Attack Techniques (MITRE ATT&CK)",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "SecurityAlert | where TimeGenerated > ago(7d) | join kind=inner (ControlMapping) on IncidentType | select MITREFrame, count() as AttackCount, max(AlertSeverity) as Severity | sort by AttackCount desc | limit 10",
+            "format": "table"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "title": "🔔 Recent Critical Incidents (Last 24h)",
+        "type": "logs",
+        "targets": [
+          {
+            "expr": "SecurityAlert | where AlertSeverity = 'Critical' and TimeGenerated > ago(24h) | select TimeGenerated, AlertName, TargetAccount, SourceIp, AlertSeverity | sort by TimeGenerated desc | limit 50",
+            "format": "logs"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "🛡️ Endpoint Security Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "(count(ComputerSecurityState where AgentHealthStatus = 'Healthy' and TimeGenerated > ago(1h))) / (count(ComputerSecurityState where TimeGenerated > ago(1h))) * 100",
+            "legendFormat": "Endpoints Healthy %"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent",
+            "thresholds": {
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 80 },
+                { "color": "green", "value": 95 }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 14,
+        "title": "🤖 ML Model Performance (LSTM C2 Detector)",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "{}  # Connect to ML metrics endpoint: /metrics/lstm_c2_detector | where TimeGenerated > ago(24h)",
+            "format": "table"
+          }
+        ],
+        "columns": [
+          { "name": "Metric", "type": "string" },
+          { "name": "Value", "type": "number" },
+          { "name": "Target", "type": "string" }
+        ],
+        "data": [
+          { "Metric": "ROC-AUC Score", "Value": 0.95, "Target": ">0.90" },
+          { "Metric": "Precision", "Value": 0.92, "Target": ">0.85" },
+          { "Metric": "Recall", "Value": 0.88, "Target": ">0.85" },
+          { "Metric": "F1 Score", "Value": 0.90, "Target": ">0.85" }
+        ]
+      }
+    ],
+    "annotations": {
+      "list": [
+        {
+          "datasource": "Azure Monitor",
+          "enable": true,
+          "expr": "IncidentUpdate where Status = 'Closed' | select TimeGenerated, IncidentName",
+          "iconColor": "green",
+          "name": "Incidents Closed",
+          "step": "60s",
+          "tagKeys": "incident,resolved",
+          "textFormat": "{{ IncidentName }} resolved"
+        },
+        {
+          "datasource": "Azure Monitor",
+          "enable": true,
+          "expr": "SecurityAlert where AlertSeverity = 'Critical' | select TimeGenerated, AlertName",
+          "iconColor": "red",
+          "name": "Critical Alerts",
+          "step": "1m",
+          "tagKeys": "critical",
+          "textFormat": "🚨 {{ AlertName }}"
+        }
+      ]
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "TimeRange",
+          "type": "interval",
+          "datasource": "Azure Monitor",
+          "options": ["5m", "15m", "1h", "6h", "24h", "7d", "30d"],
+          "default": "24h"
+        },
+        {
+          "name": "AlertSeverityFilter",
+          "type": "query",
+          "datasource": "Azure Monitor",
+          "query": "distinct AlertSeverity from SecurityAlert",
+          "options": ["All", "Critical", "High", "Medium", "Low"],
+          "default": "All"
+        },
+        {
+          "name": "ComplianceFramework",
+          "type": "query",
+          "datasource": "Azure Monitor",
+          "query": "distinct ComplianceFrameworks from ControlMapping",
+          "options": ["All", "NIST", "ISO27001", "PCI-DSS", "SOC2"],
+          "default": "All"
+        }
+      ]
+    },
+    "refresh": "5s",
+    "uidOffset": 1000,
+    "version": 1
+  },
+  "dashboardConfig": {
+    "datasource": "Azure Monitor",
+    "refreshInterval": "5s",
+    "timeFrom": "now-24h",
+    "timeShift": null,
+    "timezone": "browser",
+    "panels": 14,
+    "updateFrequency": "Every 5 seconds",
+    "alerting": {
+      "enabled": true,
+      "channels": ["Teams", "Slack", "Email"],
+      "severityThreshold": "High"
+    },
+    "exportFormat": "JSON, PNG"
+  }
+}

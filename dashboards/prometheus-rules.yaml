@@ -1,0 +1,267 @@
+groups:
+  - name: avars_security_alerts
+    interval: 30s
+    rules:
+      # CRITICAL: C2 Detection with high confidence
+      - alert: CriticalC2DetectionHighConfidence
+        expr: |
+          c2_probability{model="lstm_c2_detection"} > 0.95
+        for: 1m
+        labels:
+          severity: critical
+          component: lstm_detector
+          action: immediate_response
+        annotations:
+          summary: "🚨 CRITICAL: High-confidence C2 activity detected"
+          description: "LSTM model detected C2 heartbeat with {{ $value | humanizePercentage }} confidence from {{ $labels.instance }}"
+          runbook_url: "https://wiki.avars.local/runbooks/c2-detection"
+          dashboard_url: "http://grafana:3000/d/warroom/threat-map"
+
+      # HIGH: Multiple failed authentication attempts
+      - alert: HighRateAuthenticationFailures
+        expr: |
+          rate(failed_auth_attempts_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: high
+          component: identity
+        annotations:
+          summary: "HIGH: Brute force attack detected"
+          description: "{{ $value | humanize }} failed authentication attempts/sec detected on {{ $labels.instance }}"
+
+      # HIGH: LSTM model confidence trending dangerous
+      - alert: C2ConfidencePredictiveTrend
+        expr: |
+          predict_linear(c2_probability[30m], 5m) > 0.8
+        for: 3m
+        labels:
+          severity: high
+          component: ml_prediction
+        annotations:
+          summary: "HIGH: C2 threat trending likely within 5 minutes"
+          description: "Predictive model indicates C2 confidence will exceed 0.8 in next 5 minutes (current: {{ $value | humanizePercentage }})"
+
+      # CRITICAL: Compliance control gap detected
+      - alert: ComplianceControlGapDetected
+        expr: |
+          (count(nist_control_tested{time_bucket="24h"}) / 22) < 0.8
+        for: 1h
+        labels:
+          severity: critical
+          component: compliance
+        annotations:
+          summary: "CRITICAL: Compliance control testing gap"
+          description: "Less than 80% of NIST controls tested in last 24h. Coverage: {{ $value | humanizePercentage }}"
+          audit_impact: "Audit evidence may be incomplete for compliance reporting"
+
+      # HIGH: Lateral movement detected
+      - alert: LateralMovementDetected
+        expr: |
+          sum(rate(lateral_movement_attempts_total[5m])) > 1
+        for: 1m
+        labels:
+          severity: high
+          component: network_behavior
+        annotations:
+          summary: "HIGH: Lateral movement detected"
+          description: "{{ $value }} lateral movement attempts detected on {{ $labels.instance }}"
+
+      # HIGH: Privilege escalation attempt
+      - alert: PrivilegeEscalationAttempt
+        expr: |
+          privilege_escalation_attempts_total > 0
+        for: 1m
+        labels:
+          severity: high
+          component: identity
+        annotations:
+          summary: "HIGH: Privilege escalation attempt"
+          description: "Privilege escalation attempt detected for user {{ $labels.user }} on {{ $labels.instance }}"
+
+      # MEDIUM: Data exfiltration indicators
+      - alert: DataExfiltrationIndicators
+        expr: |
+          (rate(outbound_traffic_bytes_total[5m]) > 10000000) and
+          (count(distinct destination_country) > 3)
+        for: 5m
+        labels:
+          severity: medium
+          component: data_loss_prevention
+        annotations:
+          summary: "MEDIUM: Suspicious data transfer pattern"
+          description: "High volume outbound traffic ({{ $value | humanize }}B/s) to multiple countries detected"
+
+      # MEDIUM: Endpoint security gap
+      - alert: EndpointSecurityGap
+        expr: |
+          (count(endpoint_healthy) / count(endpoint_total)) < 0.95
+        for: 10m
+        labels:
+          severity: medium
+          component: endpoint_security
+        annotations:
+          summary: "MEDIUM: Endpoint health below threshold"
+          description: "Only {{ $value | humanizePercentage }} of endpoints reporting healthy status"
+
+      # LOW: Anomalous user sign-in
+      - alert: AnomalousUserSignIn
+        expr: |
+          anomalous_signin_score > 0.7
+        for: 5m
+        labels:
+          severity: low
+          component: identity_analytics
+        annotations:
+          summary: "LOW: Anomalous user sign-in detected"
+          description: "User {{ $labels.user }} signed in with anomaly score {{ $value | humanizePercentage }}"
+
+      # CRITICAL: LSTM model unavailable
+      - alert: LSTMModelInference ServiceDown
+        expr: |
+          up{job="lstm-c2-detector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: ml_inference
+        annotations:
+          summary: "CRITICAL: C2 detection model offline"
+          description: "LSTM C2 detector service is unavailable. Mitigation: Enabling fallback static C2 signatures"
+
+      # HIGH: Automated response failure
+      - alert: AutomatedResponseFailure
+        expr: |
+          sum(rate(automated_response_failures_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: high
+          component: soar_automation
+      annotations:
+          summary: "HIGH: Incident response automation failing"
+          description: "{{ $value | humanizePercentage }} of automated response attempts failing. Manual intervention required."
+
+      # CRITICAL: Ransomware indicators
+      - alert: RansomwareIndicators
+        expr: |
+          (rate(file_encryption_attempts[5m]) > 100) or
+          (rate(master_boot_record_modifications[5m]) > 1)
+        for: 1m
+        labels:
+          severity: critical
+          component: ransomware_detection
+        annotations:
+          summary: "🚨 CRITICAL: Ransomware activity detected"
+          description: "Multiple file encryption and/or boot modification attempts detected. Potential active ransomware!"
+
+      # HIGH: SQL Injection attempt
+      - alert: SQLInjectionAttempt
+        expr: |
+          sum(rate(sql_injection_attempts_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: high
+          component: web_application_firewall
+        annotations:
+          summary: "HIGH: SQL injection attack detected"
+          description: "{{ $value }} SQL injection attempts detected in last 5 minutes"
+
+      # MEDIUM: DDoS indicators
+      - alert: DDosIndicators
+        expr: |
+          (rate(http_requests_total[1m]) > 10000) and
+          (stddev(histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[1m]))) > 1)
+        for: 2m
+        labels:
+          severity: medium
+          component: ddos_protection
+        annotations:
+          summary: "MEDIUM: DDoS attack indicators detected"
+          description: "High request volume ({{ $value | humanize }}/min) with high latency detected"
+
+      # MEDIUM: Compliance SLA breach imminent
+      - alert: ComplianceSLABreach
+        expr: |
+          (compliance_remediation_sla_seconds - time()) < 3600
+        for: 5m
+        labels:
+          severity: medium
+          component: remediation_tracking
+        annotations:
+          summary: "MEDIUM: Compliance remediation SLA approaching breach"
+          description: "Less than 1 hour remaining to remediate control: {{ $labels.control }}"
+
+      # CRITICAL: Zero-trust policy violation
+      - alert: ZeroTrustPolicyViolation
+        expr: |
+          sum(rate(zero_trust_policy_violations_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: zero_trust_enforcement
+        annotations:
+          summary: "CRITICAL: Zero-trust network policy violated"
+          description: "{{ $value }} policy violations detected. Source: {{ $labels.source }}, Target: {{ $labels.destination }}"
+
+  - name: avars_ml_model_health
+    interval: 60s
+    rules:
+      # Model accuracy degradation
+      - alert: LSTMModelAccuracyDegradation
+        expr: |
+          lstm_model_accuracy < 0.85
+        for: 5m
+        labels:
+          severity: high
+          component: ml_model
+        annotations:
+          summary: "HIGH: LSTM model accuracy below acceptable threshold"
+          description: "Model accuracy: {{ $value | humanizePercentage }}. Retraining recommended."
+
+      # Model drift detected
+      - alert: ModelDriftDetected
+        expr: |
+          abs(prediction_distribution_js_divergence) > 0.3
+        for: 10m
+        labels:
+          severity: medium
+          component: ml_model
+        annotations:
+          summary: "MEDIUM: Model data distribution drift detected"
+          description: "JavaScript divergence: {{ $value }}. Model may need retraining."
+
+      # Insufficient training data
+      - alert: InsufficientTrainingData
+        expr: |
+          training_sample_count < 1000
+        labels:
+          severity: low
+          component: ml_model
+        annotations:
+          summary: "LOW: Limited training data for next model iteration"
+          description: "Only {{ $value | humanize }} samples available. Recommend collecting more training data."
+
+  - name: avars_compliance_tracking
+    interval: 300s  # 5-minute intervals for compliance
+    rules:
+      # No activity on critical control
+      - alert: CriticalControlNoTestingActivity
+        expr: |
+          absent(nist_control_tested{severity="critical"})
+        for: 1h
+        labels:
+          severity: critical
+          component: compliance
+        annotations:
+          summary: "CRITICAL: Critical control has no testing activity in past hour"
+          description: "Control {{ $labels.control }} should be tested continuously"
+
+      # Compliance coverage trending down
+      - alert: ComplianceCoverageTrendingDown
+        expr: |
+          predict_linear(compliance_coverage_percent[24h], 3600) < 60
+        for: 1h
+        labels:
+          severity: high
+          component: compliance
+        annotations:
+          summary: "HIGH: Compliance coverage predicting below 60% within 1 hour"
+          description: "Current coverage: {{ $value | humanizePercentage }}. Accelerate control testing."

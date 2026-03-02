@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Terraform state and local cache
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Secrets and local env files
+*.env
+*.env.*
+config/variables.env
+
+# Generated reports/evidence
+reports/*.md
+reports/*.sarif
+evidence/
+old-account-state/
+outputs.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

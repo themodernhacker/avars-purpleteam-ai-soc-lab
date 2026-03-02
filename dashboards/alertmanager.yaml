@@ -1,0 +1,220 @@
+global:
+  resolve_timeout: 5m
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+  pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+  teams_webhook_url: '${MS_TEAMS_WEBHOOK_URL}'
+
+#  Used for configuring default notifications across all escalation policies.
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+route:
+  receiver: 'default-receiver'
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  # High-severity security alerts require immediate escalation
+  routes:
+    - match:
+        severity: critical
+      receiver: 'critical-security-team'
+      continue: true
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 30m
+      routes:
+        - match:
+            component: lstm_detector
+          receiver: 'lstm-incidents'
+        - match:
+            component: ransomware_detection
+          receiver: 'incident-commander'
+        - match:
+            component: zero_trust_enforcement
+          receiver: 'security-ops'
+
+    - match:
+        severity: high
+      receiver: 'security-operations'
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 2h
+
+    - match:
+        severity: medium
+      receiver: 'security-team'
+      group_wait: 1m
+      group_interval: 15m
+      repeat_interval: 8h
+
+    - match:
+        severity: low
+      receiver: 'security-team'
+      group_wait: 5m
+      group_interval: 30m
+      repeat_interval: 24h
+
+    # Compliance alerts route separately
+    - match:
+        component: compliance
+      receiver: 'compliance-officers'
+      group_wait: 2m
+      group_interval: 30m
+      repeat_interval: 6h
+
+    # ML model health alerts
+    - match:
+        component: ml_model
+      receiver: 'data-science-team'
+      group_wait: 2m
+      group_interval: 15m
+      repeat_interval: 4h
+
+# Inhibit certain alerts under specific conditions
+inhibit_rules:
+  # If cluster is unavailable, don't send alerts about individual services
+  - source_match:
+      severity: critical
+      alertname: ClusterUnavailable
+    target_match_re:
+      severity: warning|info
+    equal: ['cluster']
+
+  # If ransomware is detected, suppress lower-severity security alerts
+  - source_match:
+      severity: critical
+      component: ransomware_detection
+    target_match_re:
+      severity: medium|low
+    equal: ['cluster', 'instance']
+
+  # Suppress data loss prevention alerts if exfiltration already confirmed
+  - source_match:
+      alertname: DataExfiltrationConfirmed
+    target_match:
+      alertname: DataExfiltrationIndicators
+    equal: ['instance', 'destination_country']
+
+receivers:
+  # Default receiver for untracked alerts
+  - name: 'default-receiver'
+    slack_configs:
+      - channel: '#security-alerts-default'
+        title: 'Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+  # Critical security team (24/7 on-call)
+  - name: 'critical-security-team'
+    slack_configs:
+      - channel: '#critical-security-incidents'
+        title: '🚨 {{.GroupLabels.alertname}} - CRITICAL'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        actions:
+          - type: button
+            text: 'View in Grafana'
+            url: '{{ (index .Alerts 0).Annotations.dashboard_url }}'
+          - type: button
+            text: 'View Runbook'
+            url: '{{ (index .Alerts 0).Annotations.runbook_url }}'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY_CRITICAL}'
+        description: '{{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}'
+        details:
+          firing: '{{ template "pagerduty.default.instances" .Alerts }}'
+    teams_configs:
+      - title: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+  # LSTM-specific incidents (AI threat detection)
+  - name: 'lstm-incidents'
+    slack_configs:
+      - channel: '#ai-threat-detection'
+        title: '🤖 LSTM Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+    opsgenie_configs:
+      - api_key: '${OPSGENIE_API_KEY}'
+        message: '{{ .GroupLabels.alertname }}'
+        priority: 'P1'
+        tags: ['lstm', 'c2detection', 'critical']
+
+  # Incident commander (escalation authority)
+  - name: 'incident-commander'
+    slack_configs:
+      - channel: '#incident-commander'
+        title: 'INCIDENT: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}\nRunbook: {{ .Annotations.runbook_url }}{{ end }}'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY_INCIDENT}'
+    email_configs:
+      - to: 'incident-commander@avars.local'
+        from: 'alertmanager@avars.local'
+        smarthost: '{{ env "SMTP_HOST"}}:{{ env "SMTP_PORT" }}'
+        auth_username: '{{ env "SMTP_USER" }}'
+        auth_password: '{{ env "SMTP_PASSWORD" }}'
+        headers:
+          Subject: '🚨 INCIDENT: {{ .GroupLabels.alertname }}'
+
+  # Security Operations Center (SOC)
+  - name: 'security-operations'
+    slack_configs:
+      - channel: '#soc-incidents'
+        title: 'HIGH: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+    opsgenie_configs:
+      - api_key: '${OPSGENIE_API_KEY}'
+        message: '{{ .GroupLabels.alertname }}'
+        priority: 'P2'
+        tags: ['security', 'high', 'soc']
+
+  # General security team alerts
+  - name: 'security-team'
+    slack_configs:
+      - channel: '#security-team'
+        title: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+    email_configs:
+      - to: 'security-team@avars.local'
+        from: 'alertmanager@avars.local'
+        smarthost: '{{ env "SMTP_HOST"}}:{{ env "SMTP_PORT" }}'
+
+  # Compliance and audit team
+  - name: 'compliance-officers'
+    slack_configs:
+      - channel: '#compliance-audits'
+        title: 'Compliance Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}\nAudit Impact: {{ .Annotations.audit_impact }}{{ end }}'
+    email_configs:
+      - to: 'compliance@avars.local'
+        from: 'alertmanager@avars.local'
+        smarthost: '{{ env "SMTP_HOST"}}:{{ env "SMTP_PORT" }}'
+        headers:
+          Subject: 'Compliance: {{ .GroupLabels.alertname }}'
+
+  # Data Science team (ML model issues)
+  - name: 'data-science-team'
+    slack_configs:
+      - channel: '#ml-model-health'
+        title: 'Model Alert: {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+    email_configs:
+      - to: 'datascience@avars.local'
+        from: 'alertmanager@avars.local'
+        smarthost: '{{ env "SMTP_HOST"}}:{{ env "SMTP_PORT" }}'
+
+# Webhook notification examples (for custom integrations)
+webhooks:
+  - url: 'http://webhook-system:8081/alerts'
+    send_resolved: true
+
+# Mute specific alerts during maintenance windows
+mute_time_intervals:
+  - name: 'maintenance-windows'
+    time_intervals:
+      - times:
+          - start_time: '02:00'
+            end_time: '04:00'
+        weekdays: ['sunday']
+

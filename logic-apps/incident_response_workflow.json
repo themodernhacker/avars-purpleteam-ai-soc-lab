@@ -1,0 +1,330 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "actions": {
+      "Check_Alert_Severity": {
+        "type": "Switch",
+        "expression": "@body('Parse_Alert_Data')['Severity']",
+        "cases": [
+          {
+            "case": "High",
+            "actions": {
+              "Call_Azure_OpenAI": {
+                "type": "Http",
+                "inputs": {
+                  "uri": "https://@{variables('openai_resource')}.openai.azure.com/openai/deployments/@{variables('deployment_id')}/chat/completions?api-version=2024-02-01",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "api-key": "@variables('openai_api_key')"
+                  },
+                  "body": {
+                    "messages": [
+                      {
+                        "role": "system",
+                        "content": "You are a cybersecurity incident analyst. Analyze the provided log data and provide:\n1. Executive Summary (2-3 sentences)\n2. Attack Technique (MITRE ATT&CK)\n3. Recommended Remediation (Python script if applicable)\nBe concise and professional."
+                      },
+                      {
+                        "role": "user",
+                        "content": "Analyze this security incident:\n\nSource IP: @{body('Parse_Alert_Data')['SourceIP']}\nTarget: @{body('Parse_Alert_Data')['DestinationIP']}\nAlert: @{body('Parse_Alert_Data')['AlertName']}\nLogs:\n@{body('Get_Alert_Logs')}"
+                      }
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 500,
+                    "model": "gpt-4o"
+                  }
+                },
+                "runAfter": {
+                  "Get_Alert_Logs": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Get_Alert_Logs": {
+                "type": "Http",
+                "inputs": {
+                  "uri": "https://api.loganalytics.azure.com/v1/workspaces/@{variables('workspace_id')}/query",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer @{variables('la_token')}"
+                  },
+                  "body": {
+                    "query": "AzureDiagnostics | where SourceIP == '@{body('Parse_Alert_Data')['SourceIP']}' | where TimeGenerated > ago(1h) | take 50"
+                  }
+                },
+                "runAfter": {
+                  "Parse_Alert_Data": [
+                    "Succeeded"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "case": "Critical",
+            "actions": {
+              "Get_Alert_Logs": {
+                "type": "Http",
+                "inputs": {
+                  "uri": "https://api.loganalytics.azure.com/v1/workspaces/@{variables('workspace_id')}/query",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer @{variables('la_token')}"
+                  },
+                  "body": {
+                    "query": "AzureDiagnostics | where SourceIP == '@{body('Parse_Alert_Data')['SourceIP']}' | where TimeGenerated > ago(1h) | take 50"
+                  }
+                },
+                "runAfter": {
+                  "Parse_Alert_Data": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Call_Azure_OpenAI": {
+                "type": "Http",
+                "inputs": {
+                  "uri": "https://@{variables('openai_resource')}.openai.azure.com/openai/deployments/@{variables('deployment_id')}/chat/completions?api-version=2024-02-01",
+                  "method": "POST",
+                  "headers": {
+                    "Content-Type": "application/json",
+                    "api-key": "@variables('openai_api_key')"
+                  },
+                  "body": {
+                    "messages": [
+                      {
+                        "role": "system",
+                        "content": "You are a cybersecurity incident analyst. Analyze the provided log data and provide:\n1. Executive Summary (2-3 sentences)\n2. Attack Technique (MITRE ATT&CK)\n3. Recommended Remediation (Python script if applicable)\nBe concise and professional."
+                      },
+                      {
+                        "role": "user",
+                        "content": "Analyze this security incident:\n\nSource IP: @{body('Parse_Alert_Data')['SourceIP']}\nTarget: @{body('Parse_Alert_Data')['DestinationIP']}\nAlert: @{body('Parse_Alert_Data')['AlertName']}\nLogs:\n@{body('Get_Alert_Logs')}"
+                      }
+                    ],
+                    "temperature": 0.7,
+                    "max_tokens": 500,
+                    "model": "gpt-4o"
+                  }
+                },
+                "runAfter": {
+                  "Get_Alert_Logs": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Request_HITL_Approval": {
+                "type": "ApiConnection",
+                "inputs": {
+                  "host": {
+                    "connection": {
+                      "name": "@parameters('$connections')['approvals']['connectionId']"
+                    }
+                  },
+                  "method": "post",
+                  "path": "/v2/approvals",
+                  "body": {
+                    "approvalType": "Basic",
+                    "title": "HITL Decision Required: Block @{body('Parse_Alert_Data')['SourceIP']}?",
+                    "assignedTo": "@variables('security_email')",
+                    "details": "Alert: @{body('Parse_Alert_Data')['AlertName']}\nSeverity: @{body('Parse_Alert_Data')['Severity']}\nSource IP: @{body('Parse_Alert_Data')['SourceIP']}\n\nAI Analysis:\n@{body('Call_Azure_OpenAI')['choices'][0]['message']['content']}\n\nDecision options: Approve (Block) or Reject (Ignore).",
+                    "enableNotifications": true,
+                    "allowReassignment": false
+                  }
+                },
+                "runAfter": {
+                  "Call_Azure_OpenAI": [
+                    "Succeeded"
+                  ]
+                }
+              },
+              "Evaluate_HITL_Decision": {
+                "type": "If",
+                "expression": {
+                  "equals": [
+                    "@body('Request_HITL_Approval')?['outcome']",
+                    "Approve"
+                  ]
+                },
+                "actions": {
+                  "Generate_Jira_Issue": {
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "@variables('jira_url')/rest/api/3/issue",
+                      "method": "POST",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": "Basic @{variables('jira_auth')}"
+                      },
+                      "body": {
+                        "fields": {
+                          "project": {
+                            "key": "SEC"
+                          },
+                          "issuetype": {
+                            "name": "Incident"
+                          },
+                          "summary": "CRITICAL: HITL Approved Block For @{body('Parse_Alert_Data')['SourceIP']}",
+                          "description": "AI Analysis:\n\n@{body('Call_Azure_OpenAI')['choices'][0]['message']['content']}\n\nHITL Decision: APPROVED (Block)\nResponder: @{body('Request_HITL_Approval')?['responder']?['email']}\n\nActions initiated:\n- IP blocked at firewall\n- Container isolation in progress\n- Hourly monitoring enabled",
+                          "priority": {
+                            "name": "Critical"
+                          },
+                          "assignee": {
+                            "name": "@variables('security_team_lead')"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "Initiate_Automatic_Response": {
+                    "type": "Http",
+                    "inputs": {
+                      "uri": "https://management.azure.com/subscriptions/@{variables('subscription_id')}/resourceGroups/@{variables('resource_group')}/providers/Microsoft.Network/azureFirewalls/@{variables('firewall_name')}/apiVersion=v2023-04-01",
+                      "method": "PUT",
+                      "headers": {
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer @{variables('azure_token')}"
+                      },
+                      "body": {
+                        "location": "@variables('location')",
+                        "properties": {
+                          "networkRuleCollections": [
+                            {
+                              "name": "Block_@{body('Parse_Alert_Data')['SourceIP']}",
+                              "priority": 100,
+                              "action": {
+                                "type": "Deny"
+                              },
+                              "rules": [
+                                {
+                                  "name": "Block_Exfiltration",
+                                  "protocols": [
+                                    "TCP"
+                                  ],
+                                  "sourceAddresses": [
+                                    "@{body('Parse_Alert_Data')['SourceIP']}"
+                                  ],
+                                  "destinationAddresses": [
+                                    "*"
+                                  ],
+                                  "destinationPorts": [
+                                    "*"
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Generate_Jira_Issue": [
+                        "Succeeded"
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "actions": {
+                    "Send_Ignore_Notification": {
+                      "type": "ServiceProvider",
+                      "inputs": {
+                        "parameters": {
+                          "emailAddress": "@variables('security_email')",
+                          "emailSubject": "HITL Ignored: @{body('Parse_Alert_Data')['AlertName']}",
+                          "emailBody": "HITL decision was IGNORE/REJECT.\n\nSource: @{body('Parse_Alert_Data')['SourceIP']}\nResponder: @{body('Request_HITL_Approval')?['responder']?['email']}\n\nNo firewall block was applied."
+                        },
+                        "serviceProviderConfiguration": {
+                          "connectionName": "OutlookV2",
+                          "operationId": "SendEmail"
+                        }
+                      }
+                    }
+                  }
+                },
+                "runAfter": {
+                  "Request_HITL_Approval": [
+                    "Succeeded"
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "default": {
+          "actions": {
+            "Send_Email_Notification": {
+              "type": "ServiceProvider",
+              "inputs": {
+                "parameters": {
+                  "emailAddress": "@variables('security_email')",
+                  "emailSubject": "Sentinel Alert: @{body('Parse_Alert_Data')['AlertName']}",
+                  "emailBody": "Low-severity alert detected.\n\nSource: @{body('Parse_Alert_Data')['SourceIP']}\nAction: Manual review recommended"
+                },
+                "serviceProviderConfiguration": {
+                  "connectionName": "OutlookV2",
+                  "operationId": "SendEmail"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Parse_Alert_Data": {
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@triggerBody()",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "AlertName": {
+                "type": "string"
+              },
+              "Severity": {
+                "type": "string"
+              },
+              "SourceIP": {
+                "type": "string"
+              },
+              "DestinationIP": {
+                "type": "string"
+              },
+              "TimeGenerated": {
+                "type": "string"
+              },
+              "Technique": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "contentVersion": "1.0.0.0",
+    "outputs": {},
+    "parameters": {},
+    "triggers": {
+      "Sentinel_Alert": {
+        "type": "ApiConnectionWebhook",
+        "inputs": {
+          "body": {
+            "callback_url": "@{listCallbackUrl()}"
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+            }
+          },
+          "path": "/incidents"
+        }
+      }
+    }
+  },
+  "parameters": {
+    "$connections": {
+      "type": "Object",
+      "defaultValue": {}
+    }
+  }
+}

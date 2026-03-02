@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: avars-grafana-warroom
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=secadmin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-SecurePassword123!@#}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel, grafana-worldmap-panel, grafana-clock-panel
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_COOKIE_SAMESITE=lax
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_AUTH_BASIC_ENABLED=true
+      - GF_SESSION_COOKIE_SECURE=true
+      - GF_PATHS_LOGS=/var/log/grafana
+      - GF_LOG_LEVEL=warn
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - grafana-provisioning-dashboards:/etc/grafana/provisioning/dashboards
+      - grafana-provisioning-datasources:/etc/grafana/provisioning/datasources
+      - ./grafana-warroom.json:/etc/grafana/provisioning/dashboards/warroom.json:ro
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+    networks:
+      - avars-monitoring
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: avars-prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yaml:/etc/prometheus/rules.yaml:ro
+      - prometheus-storage:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - avars-monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: avars-promtail
+    restart: always
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - avars-monitoring
+    depends_on:
+      - loki
+
+  loki:
+    image: grafana/loki:latest
+    container_name: avars-loki
+    restart: always
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-storage:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - avars-monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: avars-alertmanager
+    restart: always
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager.yaml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-storage:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - avars-monitoring
+    environment:
+      - TZ=UTC
+
+volumes:
+  grafana-storage:
+    driver: local
+  grafana-provisioning-dashboards:
+    driver: local
+  grafana-provisioning-datasources:
+    driver: local
+  prometheus-storage:
+    driver: local
+  loki-storage:
+    driver: local
+  alertmanager-storage:
+    driver: local
+
+networks:
+  avars-monitoring:
+    driver: bridge

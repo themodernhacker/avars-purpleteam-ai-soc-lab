@@ -1,0 +1,39 @@
+name: Validate Automation Scripts
+
+on:
+  push:
+    paths:
+      - 'scripts/kql/deploy_sentinel_whitelist_controls.ps1'
+      - 'scripts/kql/deploy_sentinel_whitelist_controls.sh'
+      - '.github/workflows/validate-automation-scripts.yml'
+  pull_request:
+    paths:
+      - 'scripts/kql/deploy_sentinel_whitelist_controls.ps1'
+      - 'scripts/kql/deploy_sentinel_whitelist_controls.sh'
+      - '.github/workflows/validate-automation-scripts.yml'
+  workflow_dispatch:
+
+jobs:
+  validate-powershell:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $script = Get-Content -Raw "scripts/kql/deploy_sentinel_whitelist_controls.ps1"
+          [scriptblock]::Create($script) | Out-Null
+          Write-Host "PowerShell syntax OK"
+
+  validate-bash:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Bash syntax
+        run: |
+          bash -n scripts/kql/deploy_sentinel_whitelist_controls.sh
+          echo "Bash syntax OK"

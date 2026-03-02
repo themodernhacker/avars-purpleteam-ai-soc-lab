@@ -1,0 +1,449 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {},
+    "triggers": {
+      "When_Microsoft_Sentinel_incident_is_created_or_updated": {
+        "type": "ApiConnectionWebhook",
+        "inputs": {
+          "body": {
+            "callback_url": "@{listCallbackUrl()}"
+          },
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+            }
+          },
+          "path": "/incident-trigger",
+          "queries": {
+            "triggerName": "When_Microsoft_Sentinel_incident_is_created_or_updated"
+          }
+        }
+      }
+    },
+    "actions": {
+      "Get_incident_details": {
+        "type": "ApiConnection",
+        "inputs": {
+          "host": {
+            "connection": {
+              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+            }
+          },
+          "method": "get",
+          "path": "/incidents/@{encodeURIComponent(triggerBody()?['object']?['id'])}"
+        }
+      },
+      "Parse_incident_data": {
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@body('Get_incident_details')",
+          "schema": {
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "properties": {
+                "type": "object",
+                "properties": {
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "severity": { "type": "string" },
+                  "owner": { "type": "object" },
+                  "classification": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Check_LSTM_C2_Detection": {
+        "type": "Condition",
+        "inputs": {
+          "expression": {
+            "or": [
+              {
+                "contains": [
+                  "@body('Parse_incident_data')?['properties']?['title']",
+                  "C2"
+                ]
+              },
+              {
+                "contains": [
+                  "@body('Parse_incident_data')?['properties']?['title']",
+                  "Command and Control"
+                ]
+              },
+              {
+                "contains": [
+                  "@body('Parse_incident_data')?['properties']?['title']",
+                  "Encrypted heartbeat"
+                ]
+              }
+            ]
+          }
+        },
+        "actions": {
+          "LSTM_Detected_C2": {
+            "type": "Scope",
+            "actions": {
+              "Parse_LSTM_alert": {
+                "type": "ParseJson",
+                "inputs": {
+                  "content": "@body('Parse_incident_data')?['properties']?['description']",
+                  "schema": {
+                    "properties": {
+                      "c2_probability": { "type": "number" },
+                      "source_ip": { "type": "string" },
+                      "source_user": { "type": "string" },
+                      "timestamp": { "type": "string" }
+                    }
+                  }
+                }
+              },
+              "Extract_compromised_user": {
+                "type": "Compose",
+                "inputs": "@body('Parse_LSTM_alert')?['source_user']"
+              },
+              "Check_C2_confidence": {
+                "type": "Condition",
+                "inputs": {
+                  "expression": {
+                    "greaterOrEquals": [
+                      "@body('Parse_LSTM_alert')?['c2_probability']",
+                      0.8
+                    ]
+                  }
+                },
+                "actions": {
+                  "HIGH_CONFIDENCE_C2_DETECTED": {
+                    "type": "Scope",
+                    "actions": {
+                      "Step_1_Disable_user_account": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "PATCH",
+                          "uri": "https://graph.microsoft.com/v1.0/users/@{encodeURIComponent(body('Extract_compromised_user'))}",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Get_OAuth_Token')?['access_token']}",
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "accountEnabled": false,
+                            "comment": "Account disabled - LSTM C2 detection at @{utcNow()}"
+                          }
+                        },
+                        "runAfter": {
+                          "Get_OAuth_Token": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Get_OAuth_Token": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://login.microsoftonline.com/@{body('Get_tenant_id')?['value']}/oauth2/v2.0/token",
+                          "body": "grant_type=client_credentials&client_id=@{variables('sp_client_id')}&client_secret=@{body('Get_sp_secret')?['value']}&scope=https://graph.microsoft.com/.default"
+                        },
+                        "runAfter": {
+                          "Get_sp_secret": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Get_sp_secret": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "connection": {
+                              "name": "@parameters('$connections')['keyvault']['connectionId']"
+                            }
+                          },
+                          "method": "get",
+                          "path": "/secrets/@{encodeURIComponent('avars-sp-password')}/value"
+                        }
+                      },
+                      "Get_tenant_id": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "connection": {
+                              "name": "@parameters('$connections')['keyvault']['connectionId']"
+                            }
+                          },
+                          "method": "get",
+                          "path": "/secrets/@{encodeURIComponent('tenant-id')}/value"
+                        }
+                      },
+                      "Step_2_Revoke_all_sessions": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://graph.microsoft.com/v1.0/users/@{encodeURIComponent(body('Extract_compromised_user'))}/revokeSignInSessions",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Get_OAuth_Token')?['access_token']}",
+                            "Content-Type": "application/json"
+                          }
+                        },
+                        "runAfter": {
+                          "Step_1_Disable_user_account": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Step_3_Force_password_reset": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://graph.microsoft.com/v1.0/users/@{encodeURIComponent(body('Extract_compromised_user'))}/changePassword",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Get_OAuth_Token')?['access_token']}",
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "currentPassword": "Temporary-Cannot-Guess-@2024",
+                            "newPassword": "@{guid()}"
+                          }
+                        },
+                        "runAfter": {
+                          "Step_2_Revoke_all_sessions": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Step_4_Trigger_PIM_review": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://graph.microsoft.com/beta/privilegedaccess/aadResources/resourceRequests",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Get_OAuth_Token')?['access_token']}",
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "requestType": "UserAdd",
+                            "resourceId": "/subscriptions/@{variables('subscription_id')}/resourceGroups/avars-rg",
+                            "roleDefinitionId": "/subscriptions/@{variables('subscription_id')}/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c",
+                            "subjectId": "@{body('Parse_incident_data')?['properties']?['owner']?['objectId']}",
+                            "assignmentState": "Eligible",
+                            "reason": "User @{body('Extract_compromised_user')} account compromised by C2 malware. Account disabled. Review and approve re-enablement after investigation."
+                          }
+                        },
+                        "runAfter": {
+                          "Step_3_Force_password_reset": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Step_5_Block_IP_at_firewall": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://management.azure.com/subscriptions/@{variables('subscription_id')}/resourceGroups/avars-rg/providers/Microsoft.Network/azureFirewalls/avars-lab-fw/addIpRules?api-version=2020-05-01",
+                          "headers": {
+                            "Authorization": "Bearer @{body('Get_OAuth_Token')?['access_token']}",
+                            "Content-Type": "application/json",
+                            "X-Threat-Level": "CRITICAL"
+                          },
+                          "body": {
+                            "properties": {
+                              "networkRuleCollections": [
+                                {
+                                  "name": "BlockC2Source",
+                                  "priority": 100,
+                                  "action": {
+                                    "type": "Deny"
+                                  },
+                                  "rules": [
+                                    {
+                                      "name": "BlockC2IP",
+                                      "sourceAddresses": [
+                                        "@{body('Parse_LSTM_alert')?['source_ip']}"
+                                      ],
+                                      "destinationAddresses": [
+                                        "*"
+                                      ],
+                                      "protocols": [
+                                        "TCP",
+                                        "UDP"
+                                      ],
+                                      "destinationPorts": [
+                                        "*"
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "runAfter": {
+                          "Step_4_Trigger_PIM_review": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Step_6_Generate_AI_compliance_report": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "POST",
+                          "uri": "https://@{variables('openai_deployment')}.openai.azure.com/openai/deployments/@{variables('openai_model')}/chat/completions?api-version=2024-02-01",
+                          "headers": {
+                            "api-key": "@{body('Get_openai_key')?['value']}",
+                            "Content-Type": "application/json"
+                          },
+                          "body": {
+                            "messages": [
+                              {
+                                "role": "system",
+                                "content": "You are a CISO-level security compliance analyst. Generate professional audit reports mapping incidents to NIST SP 800-53 and ISO 27001 controls."
+                              },
+                              {
+                                "role": "user",
+                                "content": "Generate a compliance audit report for this C2 detection incident:\n\nIncident: @{body('Parse_incident_data')?['properties']?['title']}\nUser: @{body('Extract_compromised_user')}\nC2 Probability: @{body('Parse_LSTM_alert')?['c2_probability']}\nTimestamp: @{body('Parse_LSTM_alert')?['timestamp']}\nSource IP: @{body('Parse_LSTM_alert')?['source_ip']}\n\nAutomatic Response Actions Taken:\n1. User account disabled (AC-2 control)\n2. All sessions revoked (AC-4 control)\n3. Password reset forced (IA-5 control)\n4. Source IP blocked (SI-4 control)\n5. PIM review triggered (AC-6 control)\n\nFormat the report with:\n- Executive Summary\n- Controls Tested (NIST & ISO mapping)\n- Incident Timeline\n- Remediation Actions\n- Regulatory Compliance Assessment\n- Risk Score Post-Mitigation"
+                              }
+                            ],
+                            "temperature": 0.7,
+                            "max_tokens": 1500
+                          }
+                        },
+                        "runAfter": {
+                          "Step_5_Block_IP_at_firewall": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Get_openai_key": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "connection": {
+                              "name": "@parameters('$connections')['keyvault']['connectionId']"
+                            }
+                          },
+                          "method": "get",
+                          "path": "/secrets/@{encodeURIComponent('openai-api-key')}/value"
+                        }
+                      },
+                      "Step_7_Update_incident_with_report": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "connection": {
+                              "name": "@parameters('$connections')['azuresentinel']['connectionId']"
+                            }
+                          },
+                          "method": "patch",
+                          "path": "/incidents/@{encodeURIComponent(triggerBody()?['object']?['id'])}",
+                          "body": {
+                            "properties": {
+                              "description": "C2 DETECTION - AUTOMATED RESPONSE\n\n🤖 AI Compliance Report:\n@{body('Step_6_Generate_AI_compliance_report')?['choices'][0]?['message']?['content']}\n\n✅ Remediation Status: COMPLETE\n- Account disabled\n- Sessions revoked\n- Password reset\n- IP blocked\n- PIM review requested",
+                              "classification": "TruePositive"
+                            }
+                          }
+                        },
+                        "runAfter": {
+                          "Step_6_Generate_AI_compliance_report": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Step_8_Send_executive_alert": {
+                        "type": "ServiceProvider",
+                        "inputs": {
+                          "parameters": {
+                            "EmailAddress": "@variables('security_team_email')",
+                            "Subject": "🚨 CRITICAL: C2 Malware Detected & Neutralized - Incident @{body('Parse_incident_data')?['id']}",
+                            "Body": "INCIDENT SUMMARY\n================\nSeverity: CRITICAL\nType: C2 (Command & Control) Communication\nUser: @{body('Extract_compromised_user')}\nC2 Confidence: @{body('Parse_LSTM_alert')?['c2_probability']}%\nTime: @{body('Parse_LSTM_alert')?['timestamp']}\n\nAUTOMATED RESPONSE TAKEN\n========================\n✅ 1. User account DISABLED (AC-2)\n✅ 2. All sessions REVOKED (AC-4)\n✅ 3. Password RESET forced (IA-5)\n✅ 4. Source IP BLOCKED at firewall (SI-4)\n✅ 5. PIM review TRIGGERED (AC-6)\n✅ 6. AI compliance report GENERATED\n\nResponse Time: <2 minutes (Automated)\nControls Covered: 6/6\nCompliance Status: AUDITABLE\n\nAI-GENERATED COMPLIANCE ASSESSMENT\n===================================\n@{body('Step_7_Update_incident_with_report')?['properties']?['description']}\n\nNEXT STEPS\n==========\n1. Review PIM activation request for security team\n2. Investigate user device for persistence\n3. Review user's recent activities in Sentinel\n4. Sign off on compliance audit in SharePoint\n\nDashboard: https://portal.azure.com/#@Microsoft.onmicrosoft.com/dashboard\nIncident: https://portal.azure.com/#view/Microsoft_Azure_Security_Insights/IncidentsBlade/id/@{encodeURIComponent(triggerBody()?['object']?['id'])}"
+                          },
+                          "serviceProviderConfiguration": {
+                            "connectionName": "outlook",
+                            "operationId": "SendEmail"
+                          }
+                        },
+                        "runAfter": {
+                          "Step_7_Update_incident_with_report": [
+                            "Succeeded"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "actions": {
+            "Standard_Security_Response": {
+              "type": "Scope",
+              "actions": {
+                "Note_non_C2_incident": {
+                  "type": "Compose",
+                  "inputs": "This incident is not C2-related. Standard security response will be used."
+                }
+              }
+            }
+          }
+        }
+      },
+      "Initialize_variables": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "sp_client_id",
+              "type": "string",
+              "value": "@parameters('ServicePrincipalClientId')"
+            },
+            {
+              "name": "subscription_id",
+              "type": "string",
+              "value": "@parameters('SubscriptionId')"
+            },
+            {
+              "name": "security_team_email",
+              "type": "string",
+              "value": "@parameters('SecurityTeamEmail')"
+            },
+            {
+              "name": "openai_deployment",
+              "type": "string",
+              "value": "@parameters('OpenAIDeployment')"
+            },
+            {
+              "name": "openai_model",
+              "type": "string",
+              "value": "gpt-4o"
+            }
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    },
+    "ServicePrincipalClientId": {
+      "defaultValue": "",
+      "type": "String"
+    },
+    "SubscriptionId": {
+      "defaultValue": "",
+      "type": "String"
+    },
+    "SecurityTeamEmail": {
+      "defaultValue": "security@example.com",
+      "type": "String"
+    },
+    "OpenAIDeployment": {
+      "defaultValue": "avars-openai",
+      "type": "String"
+    }
+  }
+}

@@ -1,0 +1,79 @@
+apiVersion: 1
+
+providers:
+  - name: 'Azure Monitor'
+    orgId: 1
+    folder: 'Datasources'
+    type: grafana-azure-monitor-datasource
+    disableDeletion: false
+    editable: true
+    options:
+      azureAuthType: 'clientsecret'
+      azureCloud: 'AzureCloud'
+      clientId: '${AZURE_CLIENT_ID}'
+      clientSecret: '${AZURE_CLIENT_SECRET}'
+      tenantId: '${AZURE_TENANT_ID}'
+      defaultSubscriptionId: '${AZURE_SUBSCRIPTION_ID}'
+
+datasources:
+  - name: Azure Monitor
+    type: grafana-azure-monitor-datasource
+    orgId: 1
+    jsonData:
+      azureAuthType: clientsecret
+      azureCloud: AzureCloud
+      clientId: ${AZURE_CLIENT_ID}
+      clientSecret: ${AZURE_CLIENT_SECRET}
+      tenantId: ${AZURE_TENANT_ID}
+      defaultSubscriptionId: ${AZURE_SUBSCRIPTION_ID}
+      logAnalyticsSubscriptionId: ${AZURE_SUBSCRIPTION_ID}
+      logAnalyticsDefaultWorkspace: ${LOG_ANALYTICS_WORKSPACE_ID}
+    secureJsonData:
+      clientSecret: ${AZURE_CLIENT_SECRET}
+    version: 1
+    editable: true
+
+  - name: Prometheus
+    type: prometheus
+    orgId: 1
+    url: http://prometheus:9090
+    access: proxy
+    isDefault: false
+    version: 1
+    editable: true
+
+  - name: Loki Logs
+    type: loki
+    orgId: 1
+    url: http://loki:3100
+    access: proxy
+    isDefault: false
+    version: 1
+    editable: true
+    jsonData:
+      maxLines: 1000
+
+  - name: Alertmanager
+    type: alertmanager
+    orgId: 1
+    url: http://alertmanager:9093
+    access: proxy
+    isDefault: false
+    version: 1
+    editable: true
+
+  - name: Microsoft Sentinel
+    type: grafana-graphite-datasource
+    orgId: 1
+    url: https://${AZURE_TENANT_ID}.log.analytics.azure.com/v1
+    access: proxy
+    httpHeaderName1: Authorization
+    httpHeaderValue1: Bearer ${AZURE_ACCESS_TOKEN}
+    isDefault: false
+    version: 1
+    editable: true
+    jsonData:
+      logAnalyticsWorkspaceId: ${LOG_ANALYTICS_WORKSPACE_ID}
+      customHttpHeaders:
+        'Content-Type': 'application/json'
+

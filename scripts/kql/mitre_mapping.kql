@@ -1,0 +1,315 @@
+// KQL Queries for Project A.V.A.R.S
+// Phase 2: Attack Detection and MITRE ATT&CK Mapping
+// 
+// Copy these queries into Microsoft Sentinel to create detection rules
+// Each query maps to specific MITRE ATT&CK techniques
+
+// ============================================================
+// QUERY 1: SQL Injection Detection (MITRE ATT&CK: T1190)
+// ============================================================
+// Technique: Exploit Public-Facing Application
+// Description: Detect SQL injection attacks in firewall logs
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName contains "ApplicationRuleLog"
+| where msg_s contains "DENY" or msg_s contains "ALLOW"
+| extend FullMessage = msg_s
+| extend RequestData = extract_all(@"[?&]([^=&]+)=([^&]*)", FullMessage)
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| extend DestinationPort = extract(@"DestinationPort=(\d+)", 1, msg_s)
+| where RequestData has_any ("union", "select", "insert", "update", "delete", "drop", "exec", "xp_", "'--", "/*", "*/")
+| summarize 
+    Count = count(),
+    UniqueDestinations = dcount(DestinationIP),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by SourceIP, DestinationIP, DestinationPort
+| where Count > 1
+| extend Technique = "T1190 - Exploit Public-Facing Application"
+| project 
+    TimeGenerated = FirstAttempt,
+    SourceIP,
+    DestinationIP,
+    DestinationPort,
+    AttackAttempts = Count,
+    Technique,
+    Severity = "High"
+
+
+// ============================================================
+// QUERY 2: Credential Stuffing Detection (MITRE ATT&CK: T1110)
+// ============================================================
+// Technique: Brute Force
+// Description: Detect multiple failed authentication attempts
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName contains "ApplicationRuleLog"
+| where msg_s contains "401" or msg_s contains "403"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| extend DestinationPort = extract(@"DestinationPort=(\d+)", 1, msg_s)
+| extend RequestURL = extract(@"Url=([^\s]+)", 1, msg_s)
+| extend UserAgent = extract(@"UserAgent=([^\s]+)", 1, msg_s)
+| where isnotempty(SourceIP)
+| summarize 
+    FailureCount = count(),
+    DistinctUserAgents = dcount(UserAgent),
+    DistinctDestinations = dcount(DestinationIP),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by SourceIP, DestinationPort
+| where FailureCount > 10 and TimeSpan <= 5m
+| extend Technique = "T1110 - Brute Force"
+| project 
+    TimeGenerated = FirstAttempt,
+    AttackerIP = SourceIP,
+    TargetPort = DestinationPort,
+    FailureCount,
+    DistinctUserAgents,
+    Technique,
+    Severity = "High"
+
+
+// ============================================================
+// QUERY 3: Port Scanning Detection (MITRE ATT&CK: T1046)
+// ============================================================
+// Technique: Network Service Scanning
+// Description: Detect reconnaissance port scanning activity
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where msg_s contains "DENY"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| extend DestinationPort = extract(@"DestinationPort=(\d+)", 1, msg_s)
+| extend Protocol = extract(@"Protocol=(\w+)", 1, msg_s)
+| where isnotempty(SourceIP) and isnotempty(DestinationPort)
+| summarize 
+    UniquePorts = dcount(DestinationPort),
+    UniqueDestinationIPs = dcount(DestinationIP),
+    TotalAttempts = count(),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated),
+    FirstScan = min(TimeGenerated),
+    LastScan = max(TimeGenerated),
+    PortsScanned = make_set(DestinationPort)
+    by SourceIP
+| where UniquePorts > 15
+| extend Technique = "T1046 - Network Service Scanning"
+| project 
+    FirstScanTime = FirstScan,
+    AttackerIP = SourceIP,
+    UniquePorts,
+    UniqueTargets = UniqueDestinationIPs,
+    TotalDeniedConnections = TotalAttempts,
+    PortsScanned,
+    Technique,
+    Severity = "Medium"
+
+
+// ============================================================
+// QUERY 4: Reconnaissance Activity Pattern (MITRE ATT&CK: T1592)
+// ============================================================
+// Technique: Gather Victim Host Information
+// Description: Multiple query patterns from same source IP
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName contains "ApplicationRuleLog"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend RequestURL = extract(@"Url=([^\s]+)", 1, msg_s)
+| extend UserAgent = extract(@"UserAgent=([^\s]+)", 1, msg_s)
+| extend RequestMethod = extract(@"Method=(\w+)", 1, msg_s)
+| where isnotempty(SourceIP) and isnotempty(RequestURL)
+| where RequestURL has_any ("admin", "config", "api", "debug", "test", "backup", "sql", "database")
+| summarize 
+    ReconQueries = count(),
+    UniqueEndpoints = dcount(RequestURL),
+    UniqueUserAgents = dcount(UserAgent),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated),
+    FirstQuery = min(TimeGenerated),
+    LastQuery = max(TimeGenerated),
+    UniqueHttpMethods = dcount(RequestMethod)
+    by SourceIP
+| where ReconQueries > 5
+| extend Technique = "T1592 - Gather Victim Host Information"
+| project 
+    FirstTime = FirstQuery,
+    ReconSourceIP = SourceIP,
+    ProbeCount = ReconQueries,
+    UniqueEndpoints,
+    UniqueUserAgents,
+    Technique,
+    Severity = "Medium"
+
+
+// ============================================================
+// QUERY 5: User Enumeration Detection (MITRE ATT&CK: T1589)
+// ============================================================
+// Technique: Gather Victim Identity Information
+// Description: Attempt to enumerate valid usernames
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName contains "ApplicationRuleLog"
+| where msg_s contains "login" or msg_s contains "users" or msg_s contains "auth"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend RequestURL = extract(@"Url=([^\s]+)", 1, msg_s)
+| extend QueryString = extract(@"\?(.+)", 1, RequestURL)
+| where QueryString has_any ("username", "email", "user", "login")
+| summarize 
+    EnumerationAttempts = count(),
+    UniqueQueries = dcount(QueryString),
+    TimeSpan = max(TimeGenerated) - min(TimeGenerated),
+    FirstAttempt = min(TimeGenerated),
+    LastAttempt = max(TimeGenerated)
+    by SourceIP
+| where EnumerationAttempts > 5
+| extend Technique = "T1589 - Gather Victim Identity Information"
+| project 
+    FirstTime = FirstAttempt,
+    EnumeratorIP = SourceIP,
+    AttemptCount = EnumerationAttempts,
+    Technique,
+    Severity = "Medium"
+
+
+// ============================================================
+// QUERY 6: Web Application Attack Patterns
+// ============================================================
+// Multiple attack vectors in short timeframe
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName == "AzureFirewallApplicationRuleLog"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend RequestPayload = msg_s
+| extend AttackType = case(
+    RequestPayload has_any ("union", "select", "insert", "delete", "drop", "'--") or RequestPayload has_any ("/*", "*/") , "SQL-Injection",
+    RequestPayload has_any ("<script", "javascript:", "onerror=", "<img") or RequestPayload has_any ("/>") , "XSS-Injection",
+    RequestPayload has_any ("../", "..\\", "%2e%2e") , "Path-Traversal",
+    RequestPayload has_any ("exec", "system", "eval", "passthru") , "Code-Injection",
+    "Unknown-Attack"
+    )
+| where AttackType != "Unknown-Attack"
+| summarize 
+    TotalAttempts = count(),
+    AttackTypes = make_set(AttackType),
+    DifferentAttackCount = dcount(AttackType),
+    TimeRange = max(TimeGenerated) - min(TimeGenerated),
+    FirstAttack = min(TimeGenerated),
+    LastAttack = max(TimeGenerated)
+    by SourceIP
+| where DifferentAttackCount > 1 or TotalAttempts > 10
+| extend Severity = case(
+    DifferentAttackCount >= 3, "Critical",
+    DifferentAttackCount == 2, "High",
+    "Medium"
+    )
+| project 
+    FirstAttackTime = FirstAttack,
+    AttackerIP = SourceIP,
+    TotalAttacks = TotalAttempts,
+    AttackCategories = AttackTypes,
+    UniqueAttackTypes = DifferentAttackCount,
+    Severity
+
+
+// ============================================================
+// QUERY 7: Anomaly Baseline - Hourly Traffic Pattern
+// ============================================================
+// Create baseline for normal traffic patterns
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName == "AzureFirewallApplicationRuleLog"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| extend Hour = bin(TimeGenerated, 1h)
+| summarize 
+    RequestCount = count(),
+    UniqueSourceIPs = dcount(SourceIP),
+    UniqueDestIPs = dcount(DestinationIP),
+    AvgRequestSize = avg(strlen(msg_s))
+    by Hour, DestinationIP
+| extend 
+    RequestCountZ = (RequestCount - avg(RequestCount) over (DestinationIP)) / stdev(RequestCount) over (DestinationIP),
+    UniqueIPsZ = (UniqueSourceIPs - avg(UniqueSourceIPs) over (DestinationIP)) / stdev(UniqueSourceIPs) over (DestinationIP)
+| where abs(RequestCountZ) > 2 or abs(UniqueIPsZ) > 2
+| project 
+    TimeGenerated = Hour,
+    DestinationIP,
+    RequestCount,
+    UniqueSourceIPs,
+    RequestCountZScore = RequestCountZ,
+    Anomaly = "Potential DDoS or unusual traffic pattern"
+
+
+// ============================================================
+// QUERY 8: Lateral Movement Detection
+// ============================================================
+// Internal network reconnaissance
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where msg_s contains "DENY"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| where SourceIP matches regex @"^10\." and DestinationIP matches regex @"^10\."
+| extend DestinationPort = extract(@"DestinationPort=(\d+)", 1, msg_s)
+| where DestinationPort in ("445", "139", "135", "3389", "22", "5985", "5986")
+| summarize 
+    AttemptCount = count(),
+    UniqueTargets = dcount(DestinationIP),
+    PortsUsed = make_set(DestinationPort),
+    TimeRange = max(TimeGenerated) - min(TimeGenerated)
+    by SourceIP
+| where AttemptCount > 3
+| extend Technique = "T1570 - Lateral Tool Transfer / T1021 - Remote Service Session Initiation"
+| project 
+    SourceIP,
+    LateralMovementAttempts = AttemptCount,
+    CompromisedTargets = UniqueTargets,
+    PrivilegedPorts = PortsUsed,
+    Technique,
+    Severity = "Critical"
+
+
+// ============================================================
+// QUERY 9: Data Exfiltration Detection (Low and Slow)
+// ============================================================
+// Detect suspicious outbound traffic patterns
+
+AzureDiagnostics
+| where ResourceType == "AZUREFIREWALLS"
+| where OperationName == "AzureFirewallNetworkRuleLog"
+| where msg_s contains "ALLOW"
+| extend SourceIP = extract(@"SourceIP=([\d.]+)", 1, msg_s)
+| extend DestinationIP = extract(@"DestinationIP=([\d.]+)", 1, msg_s)
+| extend BytesSent = toint(extract(@"BytesSent=(\d+)", 1, msg_s))
+| where SourceIP matches regex @"^10\." and !( DestinationIP matches regex @"^10\.|^172\.|^192\.168\.")
+| summarize 
+    TotalBytes = sum(BytesSent),
+    TransferCount = count(),
+    Duration = max(TimeGenerated) - min(TimeGenerated),
+    FirstTransfer = min(TimeGenerated)
+    by SourceIP, DestinationIP
+| where TotalBytes > 100000000 or TransferCount > 1000
+| extend 
+    ExfiltrationIndicator = case(
+        TotalBytes > 1000000000, "Large Volume Exfiltration",
+        Duration < 1h and TotalBytes > 100000000, "Rapid Exfiltration",
+        Duration > 12h and TotalBytes > 50000000, "Low and Slow Exfiltration",
+        "Suspicious Outbound Traffic"
+    )
+| project 
+    TimeGenerated = FirstTransfer,
+    InternalIP = SourceIP,
+    ExternalDestination = DestinationIP,
+    TotalMBTransferred = TotalBytes / 1024 / 1024,
+    TransferCount,
+    ExfiltrationType = ExfiltrationIndicator,
+    Severity = "Critical"

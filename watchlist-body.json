@@ -1,0 +1,10 @@
+﻿{
+    "properties":  {
+                       "itemsSearchKey":  "SearchKey",
+                       "displayName":  "IP Whitelist",
+                       "source":  "Local file",
+                       "provider":  "Custom",
+                       "description":  "AVARS known-safe IP whitelist for false-positive suppression",
+                       "contentType":  "text/csv"
+                   }
+}

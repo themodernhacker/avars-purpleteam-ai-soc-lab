@@ -1,0 +1,363 @@
+// =============================================================================
+// KQL QUERIES: NIST SP 800-53 & ISO 27001 CONTROL MAPPING
+// Every Sentinel alert maps to compliance controls
+// This demonstrates CISO-level compliance thinking
+// =============================================================================
+
+// ============================================================================
+// 1. CONTROL MAPPING LOOKUP TABLE
+// Associates detection types with regulatory controls
+// ============================================================================
+
+let ControlMapping = datatable(
+    IncidentType: string,
+    AttackTechnique: string,
+    MITREFrame: string,
+    NISTControl: string,
+    NISTControlName: string,
+    ISO27001Control: string,
+    ISO27001ControlName: string,
+    TestingFrequency: string,
+    ComplianceFrameworks: string
+) [
+    // C2 DETECTION (LSTM Model)
+    "C2_Command_Control", "T1071", "Command and Control", "SI-4", 
+    "System Monitoring", "A.12.4.1", "Event logging and monitoring", 
+    "Continuous", "NIST, ISO27001, PCI-DSS, SOC2",
+    
+    // SQL INJECTION
+    "SQLInjection", "T1190", "Exploit Public-Facing Application", "SI-4",
+    "System Monitoring", "A.14.2.1", "Secure development lifecycle",
+    "Weekly", "NIST, ISO27001, PCI-DSS, OWASP",
+    
+    // CREDENTIAL STUFFING / BRUTE FORCE
+    "BruteForce_CredentialStuffing", "T1110", "Brute Force",
+    "AC-2", "Account Management", "A.9.2.1", "User access management",
+    "Continuous", "NIST, ISO27001, PCI-DSS, SOC2",
+    
+    // PORT SCANNING / RECONNAISSANCE
+    "PortScan_Reconnaissance", "T1046", "Network Service Scanning",
+    "SI-4", "System Monitoring", "A.13.1.1", "Network access control",
+    "Continuous", "NIST, ISO27001",
+    
+    // USER ENUMERATION
+    "UserEnumeration", "T1589", "Gather Victim Identity",
+    "AC-2", "Account Management", "A.9.1.1", "User registration and access management",
+    "Monthly", "NIST, ISO27001",
+    
+    // LATERAL MOVEMENT
+    "LateralMovement", "T1570", "Lateral Movement", "CA-3",
+    "System interconnections", "A.13.1.3", "Separation of networks",
+    "Quarterly", "NIST, ISO27001",
+    
+    // DATA EXFILTRATION
+    "DataExfiltration_LowSlow", "T1020", "Data Exfiltration", "CA-7",
+    "Continuous monitoring", "A.13.3.1", "Segregation of networks",
+    "Continuous", "NIST, ISO27001, PCI-DSS",
+    
+    // MALWARE DETECTION
+    "Malware_Detected", "T1059", "Command and Scripting Interpreter", "SI-3",
+    "Malware defenses", "A.12.2.1", "Malware detection and prevention",
+    "Continuous", "NIST, ISO27001, PCI-DSS",
+    
+    // PRIVILEGE ESCALATION
+    "PrivilegeEscalation", "T1548", "Abuse Elevation Control",
+    "AC-6", "Least Privilege", "A.9.2.5", "Access rights review",
+    "Monthly", "NIST, ISO27001",
+    
+    // ANOMALOUS SIGN-IN (Entra ID)
+    "AnomalousSignIn_RiskyLocation", "T1566", "Phishing", "AC-2",
+    "Account Management", "A.9.4.3", "Review of user access rights",
+    "Continuous", "NIST, ISO27001, SOC2"
+];
+
+// ============================================================================
+// 2. DOCUMENT EVERY INCIDENT WITH CONTROL MAPPING
+// Join SecurityAlert with NIST/ISO controls
+// ============================================================================
+
+SecurityAlert
+| where TimeGenerated > ago(7d)
+| extend 
+    // Extract incident type from alert name
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce" or AlertName contains "CredentialStuffing", "BruteForce_CredentialStuffing",
+        AlertName contains "PortScan" or AlertName contains "Reconnaissance", "PortScan_Reconnaissance",
+        AlertName contains "UserEnum", "UserEnumeration",
+        AlertName contains "LateralMovement", "LateralMovement",
+        AlertName contains "Exfiltration", "DataExfiltration_LowSlow",
+        AlertName contains "Malware", "Malware_Detected",
+        AlertName contains "PrivilegeEscalation", "PrivilegeEscalation",
+        AlertName contains "AnomalousSignIn" or AlertName contains "RiskyLocation", "AnomalousSignIn_RiskyLocation",
+        "Unknown"
+    )
+| join kind=inner (ControlMapping) on IncidentType
+| summarize 
+    AlertCount = count(),
+    FirstAlert = min(TimeGenerated),
+    LastAlert = max(TimeGenerated),
+    AffectedEntities = make_set(ResourceId),
+    Severity = max(AlertSeverity)
+    by 
+    IncidentType,
+    NISTControl,
+    NISTControlName,
+    ISO27001Control,
+    ISO27001ControlName,
+    MITREFrame,
+    ComplianceFrameworks,
+    TestingFrequency
+| project 
+    TimeGenerated = now(),
+    IncidentType,
+    AlertCount,
+    DetectionSpan = format_timespan(LastAlert - FirstAlert, 'd.hh:mm'),
+    NISTControl = strcat(NISTControl, " (", NISTControlName, ")"),
+    ISO27001Control = strcat(ISO27001Control, " (", ISO27001ControlName, ")"),
+    MITREFrame,
+    Severity,
+    ComplianceFrameworks,
+    NextAuditCycle = TestingFrequency
+| sort by AlertCount desc
+
+---
+
+// ============================================================================
+// 3. COMPLIANCE HEALTH DASHBOARD
+// Track control coverage month-over-month
+// ============================================================================
+
+let ComplianceReporting = SecurityAlert
+| where TimeGenerated > ago(30d)
+| extend
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce", "BruteForce_CredentialStuffing",
+        "Other"
+    ),
+    ReportingMonth = startofmonth(TimeGenerated)
+| join kind=inner (ControlMapping) on IncidentType
+| summarize 
+    ControlsTested = dcount(NISTControl),
+    IncidentsDetected = count(),
+    AvgSeverity = avg(toreal(case(AlertSeverity == "Critical", 4, AlertSeverity == "High", 3, AlertSeverity == "Medium", 2, 1)))
+    by ReportingMonth, ComplianceFrameworks
+| extend
+    ComplianceCoveragePercentage = case(
+        ControlsTested >= 15, 100,
+        ControlsTested >= 10, 75,
+        ControlsTested >= 5, 50,
+        25
+    ),
+    ComplianceHealth = case(
+        ComplianceCoveragePercentage >= 90, "✅ Excellent",
+        ComplianceCoveragePercentage >= 75, "⚠️  Good",
+        ComplianceCoveragePercentage >= 50, "⚠️  Fair",
+        "❌ Poor"
+    )
+| project
+    ReportingMonth,
+    ComplianceFrameworks,
+    ControlsTested,
+    IncidentsDetected,
+    ComplianceCoveragePercentage,
+    ComplianceHealth,
+    AvgSeverity,
+    Recommendation = case(
+        ComplianceCoveragePercentage < 50, "Increase control testing and monitoring",
+        ComplianceCoveragePercentage < 75, "Enhance detection capabilities",
+        "Maintain current security posture"
+    );
+
+ComplianceReporting
+| sort by ReportingMonth desc, ComplianceCoveragePercentage desc
+
+---
+
+// ============================================================================
+// 4. CONTROL SATISFACTION METRICS
+// Shows what percentage of controls are being "actively tested" by incidents
+// ============================================================================
+
+let ControlSatisfaction = SecurityAlert
+| where TimeGenerated > ago(90d)  // 3-month audit window
+| extend
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce", "BruteForce_CredentialStuffing",
+        AlertName contains "Port", "PortScan_Reconnaissance",
+        AlertName contains "Lateral", "LateralMovement",
+        "Other"
+    )
+| join kind=inner (ControlMapping) on IncidentType
+| distinct 
+    NISTControl,
+    NISTControlName,
+    IncidentType,
+    AlertName
+| summarize
+    TestMethods = make_set(AlertName),
+    IncidentTypesDetected = dcount(IncidentType)
+    by NISTControl, NISTControlName
+| extend
+    ControlSatisfactionLevel = case(
+        IncidentTypesDetected >= 3, "⭐⭐⭐ Robust - Multiple attack vectors detected",
+        IncidentTypesDetected == 2, "⭐⭐ Good - Multiple tests via incidents",
+        IncidentTypesDetected == 1, "⭐ Basic - Single attack vector detected",
+        "⚠️  Untested - No incidents to verify effectiveness"
+    )
+| project
+    NISTControl = strcat(NISTControl, " (", NISTControlName, ")"),
+    ControlSatisfactionLevel,
+    TestMethodsUsed = array_length(TestMethods),
+    DetectionTypes = IncidentTypesDetected
+| sort by DetectionTypes desc
+
+ControlSatisfaction
+
+---
+
+// ============================================================================
+// 5. AUDIT TRAIL: Every incident maps to a control test
+// ============================================================================
+
+SecurityAlert
+| where TimeGenerated > ago(30d)
+| extend
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce", "BruteForce_CredentialStuffing",
+        "Other"
+    ),
+    IncidentDate = format_datetime(TimeGenerated, 'yyyy-MM-dd HH:mm:ss')
+| join kind=inner (ControlMapping) on IncidentType
+| extend
+    ControlTestEvidence = strcat(
+        "Control ", NISTControl, " tested on ", IncidentDate, 
+        " via ", AlertName,
+        " (Confidence: ", tostring(Confidence), "%)"
+    )
+| project
+    IncidentDate = TimeGenerated,
+    IncidentType,
+    AlertName,
+    AlertSeverity,
+    NISTControl,
+    NISTControlName,
+    ISO27001Control,
+    ISO27001ControlName,
+    ControlTestEvidence,
+    AuditableEvidence = strcat(
+        "NIST ", NISTControl, " → ",
+        "ISO ", ISO27001Control, " → ",
+        "MITRE ", MITREFrame
+    ),
+    RecommendedAction = case(
+        AlertSeverity == "Critical", "Immediate remediation required. Log for compliance audit.",
+        AlertSeverity == "High", "Escalate to security team. Document control effectiveness.",
+        "Review and document detection capability"
+    )
+| sort by IncidentDate desc
+
+---
+
+// ============================================================================
+// 6. REMEDIATION EFFECTIVENESS BY CONTROL
+// Track how well we're mitigating against each control family
+// ============================================================================
+
+let RemediationMetrics = SecurityAlert
+| where TimeGenerated > ago(60d)
+| extend
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce", "BruteForce_CredentialStuffing",
+        "Other"
+    )
+| join kind=inner (ControlMapping) on IncidentType
+| extend
+    DaysSinceDetection = now() - TimeGenerated,
+    ResponseQuality = case(
+        DaysSinceDetection < timespan(1h), "Excellent (< 1 hour)",
+        DaysSinceDetection < timespan(4h), "Good (1-4 hours)",
+        DaysSinceDetection < timespan(24h), "Fair (< 1 day)",
+        "Poor (> 1 day)"
+    )
+| summarize
+    IncidentsDetected = count(),
+    AvgResponseTime = avg(DaysSinceDetection),
+    CriticalIncidents = countif(AlertSeverity == "Critical"),
+    HighIncidents = countif(AlertSeverity == "High"),
+    MitigationRate = ((dcount(ResourceId) - countif(DaysSinceDetection > timespan(24h))) / dcount(ResourceId)) * 100
+    by NISTControl, NISTControlName
+| project
+    NISTControl = strcat(NISTControl, " - ", NISTControlName),
+    IncidentsDetected,
+    CriticalIncidents,
+    HighIncidents,
+    AvgResponseTime = format_timespan(AvgResponseTime, 'd.hh:mm'),
+    MitigationRate = strcat(tostring(toint(MitigationRate)), "%"),
+    ControlEffectiveness = case(
+        MitigationRate >= 90, "✅ Excellent",
+        MitigationRate >= 75, "⚠️  Good",
+        MitigationRate >= 50, "⚠️  Fair",
+        "❌ Needs Improvement"
+    )
+| sort by IncidentsDetected desc;
+
+RemediationMetrics
+
+---
+
+// ============================================================================
+// 7. REAL-TIME COMPLIANCE DASHBOARD KQL
+// Use this in Power BI or Grafana for live monitoring
+// ============================================================================
+
+// Live Control Testing Status
+SecurityAlert
+| where TimeGenerated > ago(24h)
+| extend
+    IncidentType = case(
+        AlertName contains "C2", "C2_Command_Control",
+        AlertName contains "SQL", "SQLInjection",
+        AlertName contains "BruteForce", "BruteForce_CredentialStuffing",
+        AlertName contains "Port", "PortScan_Reconnaissance",
+        AlertName contains "Lateral", "LateralMovement",
+        AlertName contains "Exfiltration", "DataExfiltration_LowSlow",
+        "Other"
+    )
+| join kind=inner (ControlMapping) on IncidentType
+| summarize
+    AlertsLast24h = count(),
+    CriticalAlerts = countif(AlertSeverity == "Critical"),
+    ControlsTestedLast24h = dcount(NISTControl),
+    AffectedUsers = dcount(IdentityName),
+    AffectedResources = dcount(ResourceId)
+| extend
+    ComplianceStatus = case(
+        ControlsTestedLast24h >= 5, "🟢 Healthy",
+        ControlsTestedLast24h >= 3, "🟡 Monitored",
+        "🔴 Limited Coverage"
+    ),
+    RiskLevel = case(
+        CriticalAlerts > 0, "CRITICAL",
+        AlertsLast24h > 10, "HIGH",
+        AlertsLast24h > 5, "MEDIUM",
+        "LOW"
+    )
+| project
+    ComplianceStatus,
+    RiskLevel,
+    AlertsLast24h,
+    CriticalAlerts,
+    ControlsTestedLast24h,
+    AffectedUsers,
+    AffectedResources,
+    LastUpdated = now()
