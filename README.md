@@ -79,7 +79,7 @@ This project includes offensive security tooling and simulated exploitation code
 
 ### Clone & Validate (recommended first run)
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/themodernhacker/avars-purpleteam-ai-soc-lab
 cd "Project A.V.A.R.S"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_all_checks.ps1 -Quick
 ```
