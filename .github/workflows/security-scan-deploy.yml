@@ -146,8 +146,6 @@ jobs:
       uses: trufflesecurity/trufflehog@main
       with:
         path: ./
-        base: ${{ github.event.repository.default_branch }}
-        head: HEAD
       continue-on-error: true
 
     ########################################################################
@@ -194,7 +192,7 @@ jobs:
     ########################################################################
     - name: "📤 Upload Checkov Results to GitHub"
       if: always() && hashFiles('reports/checkov.sarif') != ''
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: 'reports/checkov.sarif'
         category: 'Checkov'
@@ -203,7 +201,7 @@ jobs:
 
     - name: "📤 Upload Semgrep Results to GitHub"
       if: always() && hashFiles('reports/semgrep.sarif') != ''
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: 'reports/semgrep.sarif'
         category: 'Semgrep'
@@ -212,7 +210,7 @@ jobs:
 
     - name: "📤 Upload Trivy Results to GitHub"
       if: always() && hashFiles('reports/trivy-dependencies.sarif') != ''
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       with:
         sarif_file: 'reports/trivy-dependencies.sarif'
         category: 'Trivy'
@@ -290,7 +288,18 @@ jobs:
     - name: "📥 Checkout code"
       uses: actions/checkout@v4
 
+    - name: "🐳 Check for Dockerfile"
+      id: build_dockerfile_exists
+      run: |
+        if [ -f "Dockerfile" ]; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ No Dockerfile found. Skipping container build steps."
+        fi
+
     - name: "🔐 Login to Container Registry"
+      if: steps.build_dockerfile_exists.outputs.exists == 'true'
       uses: docker/login-action@v2
       with:
         registry: ${{ env.REGISTRY }}
@@ -298,6 +307,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: "📝 Extract Metadata"
+      if: steps.build_dockerfile_exists.outputs.exists == 'true'
       id: meta
       uses: docker/metadata-action@v4
       with:
@@ -308,6 +318,7 @@ jobs:
           type=sha
 
     - name: "🐳 Build and Push"
+      if: steps.build_dockerfile_exists.outputs.exists == 'true'
       uses: docker/build-push-action@v4
       with:
         context: .
