@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 3.50"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   # Uncomment for remote state management
@@ -39,7 +43,6 @@ locals {
   spoke2_vnet_name = "${local.resource_prefix}-spoke2-vnet"
 
   log_analytics_workspace_name = "${local.resource_prefix}-law"
-  sentinel_name                = "${local.resource_prefix}-sentinel"
   firewall_name                = "${local.resource_prefix}-fw"
 
   common_tags = merge(

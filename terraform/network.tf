@@ -178,7 +178,7 @@ resource "azurerm_network_security_group" "spoke1_honeynet" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "80"
+    destination_port_range     = tostring(var.honeypot_port_http)
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
@@ -190,7 +190,7 @@ resource "azurerm_network_security_group" "spoke1_honeynet" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "443"
+    destination_port_range     = tostring(var.honeypot_port_https)
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
@@ -202,8 +202,8 @@ resource "azurerm_network_security_group" "spoke1_honeynet" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "22"
-    source_address_prefix      = "*"
+    destination_port_range     = tostring(var.honeypot_port_ssh)
+    source_address_prefix      = var.allow_kali_ip ? "*" : "VirtualNetwork"
     destination_address_prefix = "*"
   }
 
@@ -257,7 +257,7 @@ resource "azurerm_network_security_group" "spoke2_attack" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "3389"
-    source_address_prefix      = "*"
+    source_address_prefix      = var.allow_kali_ip ? "*" : "VirtualNetwork"
     destination_address_prefix = "*"
   }
 

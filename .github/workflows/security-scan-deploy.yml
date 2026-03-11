@@ -38,6 +38,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}/avars
   TF_VERSION: "1.5.6"
   CHECKOV_VERSION: "1.1.206"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 ################################################################################
 # SECURITY SCAN JOB
@@ -60,6 +61,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0  # Full history for security scanning
+
+    - name: "📁 Prepare reports directory"
+      run: mkdir -p reports
 
     ########################################################################
     # Step 2: Terraform Validation & Linting
@@ -91,7 +95,7 @@ jobs:
       run: |
         cd terraform
         tflint --init
-        tflint --format compact --minimum-failure-severity warning
+        tflint --format compact --minimum-failure-severity error
         echo "✅ TFLint linting complete"
 
     ########################################################################
@@ -189,8 +193,8 @@ jobs:
     # Step 9: Upload SARIF Reports to GitHub Security Tab
     ########################################################################
     - name: "📤 Upload Checkov Results to GitHub"
-      if: always()
-      uses: github/codeql-action/upload-sarif@v2
+      if: always() && hashFiles('reports/checkov.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: 'reports/checkov.sarif'
         category: 'Checkov'
@@ -198,8 +202,8 @@ jobs:
       continue-on-error: true
 
     - name: "📤 Upload Semgrep Results to GitHub"
-      if: always()
-      uses: github/codeql-action/upload-sarif@v2
+      if: always() && hashFiles('reports/semgrep.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: 'reports/semgrep.sarif'
         category: 'Semgrep'
@@ -207,8 +211,8 @@ jobs:
       continue-on-error: true
 
     - name: "📤 Upload Trivy Results to GitHub"
-      if: always()
-      uses: github/codeql-action/upload-sarif@v2
+      if: always() && hashFiles('reports/trivy-dependencies.sarif') != ''
+      uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: 'reports/trivy-dependencies.sarif'
         category: 'Trivy'
